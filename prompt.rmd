@@ -1,189 +1,265 @@
-# nhl_train_quant.py
-from __future__ import annotations
-
-from datetime import date
-
-from nhl_api_client import NHLDataClient
-from nhl_feature_engineering import build_training_dataset
-from nhl_quant_model import NHLQuantModel
-from nhl_goal_diff_model import NHLGoalDiffModel
 
 
-def get_training_seasons_nhl(n_seasons: int = 3) -> list[int]:
-    """
-    최근 n_seasons개의 '완료된 시즌'만 학습에 사용.
+nhl_quant_model.py 도 너가 방금 바로 줬는데. 아래 nba 모델 보고 참고할 건 없어? 
 
-    NHL 시즌 기준:
-      - 보통 10월 시작 ~ 다음해 6월 종료
-      - 여기서는 10월(>=10)이면 "그 해 시즌 진행중"으로 보고,
-        last_completed = current_season - 1 로 정의 (NBA 로직과 동일)
+===
 
-    예)
-      - 2026-01: current_season=2025, last_completed=2024 -> [2022, 2023, 2024] (n=3)
-      - 2026-11: current_season=2026, last_completed=2025 -> [2023, 2024, 2025]
-    """
-    today = date.today()
-    current_season = today.year if today.month >= 10 else today.year - 1
-    last_completed = current_season - 1
-
-    start = last_completed - (n_seasons - 1)
-    return list(range(start, last_completed + 1))
-
-
-def main():
-    seasons = get_training_seasons_nhl(n_seasons=3)
-    print(f"[NHL TRAIN] Fetching games for seasons: {seasons}")
-
-    client = NHLDataClient()
-    raw_games = client.fetch_games_by_season(seasons)
-
-    if raw_games is None or len(raw_games) == 0:
-        print("[NHL TRAIN] No games fetched. Check API or seasons list.")
-        return
-
-    print(f"[NHL TRAIN] Raw games fetched: {len(raw_games)}")
-
-    train_df, feature_cols = build_training_dataset(raw_games)
-    print(f"[NHL TRAIN] Training rows: {len(train_df)}, features: {len(feature_cols)}")
-
-    if train_df is None or train_df.empty:
-        print("[NHL TRAIN] build_training_dataset returned empty. Abort.")
-        return
-
-    # =========================
-    # A) Win model (NO time-weight)
-    # =========================
-    win_model = NHLQuantModel()
-    win_eval = win_model.train_walkforward(
-        train_df=train_df,
-        feature_cols=feature_cols,
-        n_splits=5,
-        half_life_days=None,  # 처음은 OFF
-        save=True,
-    )
-
-    print(
-        f"[NHL TRAIN] Win model saved. n_games={win_eval['n_games']}, "
-        f"mean_auc={win_eval['mean_auc']:.4f}, mean_logloss={win_eval['mean_logloss']:.4f}"
-    )
-
-    # =========================
-    # B) GoalDiff model (NO time-weight)
-    # =========================
-    gd_model = NHLGoalDiffModel()
-    gd_eval = gd_model.train_walkforward(
-        train_df=train_df,
-        feature_cols=feature_cols,
-        n_splits=5,
-        half_life_days=None,
-        save=True,
-    )
-
-    print(
-        f"[NHL TRAIN] GoalDiff model saved. n_games={gd_eval['n_games']}, "
-        f"mean_mae={gd_eval['mean_mae']:.3f}, mean_rmse={gd_eval['mean_rmse']:.3f}, "
-        f"residual_std={gd_eval['residual_std']:.3f}"
-    )
-
-
-if __name__ == "__main__":
-    main()
-
---
-
-
-
-# nba_train_quant.py
+# nba_quant_model.py
 
 from __future__ import annotations
 
-from datetime import date
+from dataclasses import dataclass
+from typing import List
 
-from nba_api_client import NBADataClient
-from nba_feature_engineering import build_training_dataset
-from nba_quant_model import NBAQuantModel
-from nba_margin_model import NBAMarginModel
+import joblib
+import numpy as np
+import pandas as pd
+from xgboost import XGBClassifier
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import roc_auc_score, log_loss
+
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
+
+from config import NBA_MODEL_PATH
+
+from sklearn.metrics import brier_score_loss
 
 
-def get_training_seasons(n_seasons: int = 3) -> list[int]:
+@dataclass
+class NBAEvalResult:
+    n_games: int
+    mean_auc: float
+    mean_logloss: float
+    mean_brier: float
+    half_life_days: float | None = None
+
+
+
+class NBAQuantModel:
     """
-    최근 n_seasons개의 '완료된 시즌'만 학습에 사용.
-
-    예)
-    - 2025-12 (시즌 진행중): last_completed = 2024 → [2022, 2023, 2024] (n=3)
-    - 2025-02 (시즌 진행중): current_season = 2024, last_completed = 2023 → [2021, 2022, 2023]
+    - game-level feature → home win prob
+    ✅ 변경점:
+      1) half-life(시간 가중치) 제거
+      2) 최신 시즌만 '시즌 경기수' 기반 신뢰도 가중치 (1.0~1.2)
+      3) OOF 기반 Calibration(iso/platt) 저장 + predict에 적용
     """
-    today = date.today()
 
-    # 10월 이후면 그 해 시즌이 "진행중"
-    current_season = today.year if today.month >= 10 else today.year - 1
-    last_completed = current_season - 1
+    def __init__(self):
+        self.model: XGBClassifier | None = None
+        self.feature_cols: List[str] = []
+        self.calibrator = None  # IsotonicRegression or LogisticRegression
 
-    start = last_completed - (n_seasons - 1)
-    return list(range(start, last_completed + 1))
+    @staticmethod
+    def _season_reliability_weight(season_games_min) -> float:
+        try:
+            g = float(season_games_min)
+        except Exception:
+            return 1.0
+
+        if g < 15:
+            return 1.00
+        if g < 30:
+            return 1.10
+        return 1.20
+
+    @staticmethod
+    def _compute_sample_weights_by_season_games(df: pd.DataFrame) -> np.ndarray:
+        if df.empty or "season" not in df.columns:
+            return np.ones(len(df), dtype=float)
+
+        current_season = int(pd.to_numeric(df["season"], errors="coerce").max())
+        s = pd.to_numeric(df["season"], errors="coerce").fillna(current_season).astype(int)
+
+        # season_games 없으면 전부 1
+        if ("season_games_home" not in df.columns) or ("season_games_away" not in df.columns):
+            return np.ones(len(df), dtype=float)
+
+        g_home = pd.to_numeric(df["season_games_home"], errors="coerce").fillna(0).values
+        g_away = pd.to_numeric(df["season_games_away"], errors="coerce").fillna(0).values
+        g_min = np.minimum(g_home, g_away)
+
+        w = np.ones(len(df), dtype=float)
+        is_current = (s.values == current_season)
+        idxs = np.where(is_current)[0]
+        for i in idxs:
+            w[i] = NBAQuantModel._season_reliability_weight(g_min[i])
+        return w
+
+    def train_walkforward(
+        self,
+        df_train: pd.DataFrame,
+        feature_cols: List[str],
+        n_splits: int = 5,
+        random_state: int = 42,
+        half_life_days: float | None = None,  # 호환용
+        save: bool = True,
+        eval_mode: str = "holdout",           # ✅ "holdout" or "tscv"
+        holdout_frac: float = 0.20,           # ✅ 최근 20%
+        min_holdout_rows: int = 200,          # ✅ 너무 작으면 tscv로 fallback
+    ) -> NBAEvalResult:
+        df = df_train.sort_values("date").reset_index(drop=True).copy()
+        df["date"] = pd.to_datetime(df["date"])
+
+        X = df[feature_cols].values
+        y = df["target"].astype(int).values
+
+        # 최신 시즌만 1.0~1.2
+        w_rows = self._compute_sample_weights_by_season_games(df)
+
+        def _fit_xgb(X_tr, y_tr, w_tr):
+            m = XGBClassifier(
+                n_estimators=400,
+                max_depth=4,
+                learning_rate=0.05,
+                subsample=0.9,
+                colsample_bytree=0.9,
+                eval_metric="logloss",
+                random_state=random_state,
+                n_jobs=-1,
+            )
+            m.fit(X_tr, y_tr, sample_weight=w_tr)
+            return m
+
+        # ----------------------------
+        # (A) 최근 20% HOLDOUT (운영 추천)
+        # ----------------------------
+        use_holdout = (eval_mode.lower() == "holdout")
+        n = len(df)
+        n_hold = int(np.floor(n * float(holdout_frac)))
+        if n_hold < int(min_holdout_rows):
+            use_holdout = False
+
+        preds_oof = np.full(n, np.nan, dtype=float)
+
+        if use_holdout:
+            split = n - n_hold
+            tr_idx = np.arange(0, split)
+            va_idx = np.arange(split, n)
+
+            X_tr, y_tr = X[tr_idx], y[tr_idx]
+            X_va, y_va = X[va_idx], y[va_idx]
+            w_tr = w_rows[tr_idx]
+
+            model = _fit_xgb(X_tr, y_tr, w_tr)
+            p_va = model.predict_proba(X_va)[:, 1].astype(float)
+            preds_oof[va_idx] = p_va
+
+            auc = roc_auc_score(y_va, p_va)
+            ll = log_loss(y_va, p_va)
+            br = brier_score_loss(y_va, p_va)
+            print(f"[NBA WIN HOLDOUT] last {int(holdout_frac*100)}%: AUC={auc:.4f}, LogLoss={ll:.4f}, Brier={br:.4f}")
+
+            mean_auc, mean_ll, mean_br = float(auc), float(ll), float(br)
+
+        # ----------------------------
+        # (B) TimeSeriesSplit (기존 방식)
+        # ----------------------------
+        else:
+            tscv = TimeSeriesSplit(n_splits=n_splits)
+            aucs, loglosses, briers = [], [], []
+
+            for fold, (tr_idx, val_idx) in enumerate(tscv.split(X, y), start=1):
+                X_tr, X_val = X[tr_idx], X[val_idx]
+                y_tr, y_val = y[tr_idx], y[val_idx]
+                w_tr = w_rows[tr_idx]
+
+                model = _fit_xgb(X_tr, y_tr, w_tr)
+
+                p_val = model.predict_proba(X_val)[:, 1].astype(float)
+                preds_oof[val_idx] = p_val
+
+                auc = roc_auc_score(y_val, p_val)
+                ll = log_loss(y_val, p_val)
+                br = brier_score_loss(y_val, p_val)
+
+                aucs.append(auc)
+                loglosses.append(ll)
+                briers.append(br)
+                print(f"[NBA WIN WF] Fold {fold}: AUC={auc:.4f}, LogLoss={ll:.4f}, Brier={br:.4f}")
+
+            mean_auc = float(np.mean(aucs)) if aucs else np.nan
+            mean_ll = float(np.mean(loglosses)) if loglosses else np.nan
+            mean_br = float(np.mean(briers)) if briers else np.nan
+            print(f"[NBA WIN WF] mean AUC={mean_auc:.4f}, mean LogLoss={mean_ll:.4f}, mean Brier={mean_br:.4f}")
+
+        # ----------------------------
+        # Calibration (OOF 기반)
+        # ----------------------------
+        cal = None
+        mask = ~np.isnan(preds_oof)
+        try:
+            if mask.sum() >= 200:
+                iso = IsotonicRegression(out_of_bounds="clip")
+                iso.fit(preds_oof[mask], y[mask])
+                cal = iso
+            else:
+                lr = LogisticRegression(solver="lbfgs")
+                lr.fit(preds_oof[mask].reshape(-1, 1), y[mask])
+                cal = lr
+        except Exception:
+            cal = None
+
+        # ----------------------------
+        # Final train (전체 데이터)
+        # ----------------------------
+        final_model = _fit_xgb(X, y, w_rows)
+
+        self.model = final_model
+        self.feature_cols = list(feature_cols)
+        self.calibrator = cal
+
+        if save:
+            joblib.dump(
+                {"model": self.model, "feature_cols": self.feature_cols, "calibrator": self.calibrator},
+                NBA_MODEL_PATH,
+            )
+            print(f"[NBAQuantModel] Final win model saved to {NBA_MODEL_PATH}")
+
+        return NBAEvalResult(
+            n_games=len(df),
+            mean_auc=mean_auc,
+            mean_logloss=mean_ll,
+            mean_brier=mean_br,
+            half_life_days=None,
+        )
 
 
+    @staticmethod
+    def load_from_disk() -> "NBAQuantModel":
+        obj = joblib.load(NBA_MODEL_PATH)
+        m = NBAQuantModel()
+        m.model = obj["model"]
+        m.feature_cols = obj["feature_cols"]
+        m.calibrator = obj.get("calibrator", None)
+        return m
 
-def main():
-    seasons = get_training_seasons(n_seasons=2)
-    print(f"[NBA TRAIN] Fetching games for seasons: {seasons}")
+    def predict_proba(self, df_today: pd.DataFrame) -> pd.DataFrame:
+        if self.model is None or not self.feature_cols:
+            raise ValueError("NBAQuantModel.predict_proba: model not loaded/trained.")
 
-    client = NBADataClient()
-    raw_games = client.fetch_games_by_season(seasons)
+        missing = [c for c in self.feature_cols if c not in df_today.columns]
+        if missing:
+            raise ValueError(f"[NBA WIN] Missing features in input: {missing}")
 
-    if raw_games is None or len(raw_games) == 0:
-        print("[NBA TRAIN] No games fetched. Check API or seasons list.")
-        return
+        X = df_today[self.feature_cols].values
+        proba = self.model.predict_proba(X)[:, 1].astype(float)
 
-    print(f"[NBA TRAIN] Raw games fetched: {len(raw_games)}")
+        # calibration 적용
+        if self.calibrator is not None:
+            try:
+                cal = self.calibrator
+                if hasattr(cal, "predict") and not hasattr(cal, "predict_proba"):
+                    # isotonic
+                    proba = cal.predict(proba)
+                else:
+                    # platt logistic
+                    proba = cal.predict_proba(proba.reshape(-1, 1))[:, 1]
+            except Exception:
+                pass
 
-    train_df, feature_cols = build_training_dataset(raw_games)
-    print(f"[NBA TRAIN] Training rows: {len(train_df)}, features: {len(feature_cols)}")
+        proba = np.clip(proba, 0.01, 0.99)
 
-    if train_df is None or train_df.empty:
-        print("[NBA TRAIN] build_training_dataset returned empty. Abort.")
-        return
-
-    # =========================
-    # A) Win model (NO time-weight)
-    # =========================
-    win_model = NBAQuantModel()
-    win_eval = win_model.train_walkforward(
-        train_df,
-        feature_cols,
-        n_splits=5,
-        half_life_days=None,  # 의미 없지만 명시
-        save=True,
-    )
-
-    print(
-        f"[NBA TRAIN] Win model saved. n_games={win_eval.n_games}, "
-        f"mean_auc={win_eval.mean_auc:.4f}, mean_logloss={win_eval.mean_logloss:.4f}"
-    )
-
-    # =========================
-    # B) Margin model (NO time-weight)
-    # =========================
-    margin_model = NBAMarginModel()
-    margin_eval = margin_model.train_walkforward(
-        train_df,
-        feature_cols,
-        n_splits=5,
-        half_life_days=None,  # 의미 없지만 명시
-        save=True,
-    )
-
-    print(
-        f"[NBA TRAIN] Margin model saved. n_games={margin_eval.n_games}, "
-        f"mean_mae={margin_eval.mean_mae:.3f}, mean_rmse={margin_eval.mean_rmse:.3f}, "
-        f"residual_std={margin_eval.residual_std:.3f}"
-    )
-
-
-if __name__ == "__main__":
-    main()
-
-
-====
-
-이게 내가 nba 에서 썼던 버전인데, 뭐 참고할 건 없어? 예를 들면 트레인을 몇 시즌어치 게임을 한다던가 등등. 아니면 그외 등등. 
+        out = df_today.copy()
+        out["p_home_win"] = proba
+        return out
