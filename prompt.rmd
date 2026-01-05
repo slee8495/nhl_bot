@@ -1,435 +1,661 @@
+config.py
+odds_client.py
+nhl_api_client.py 
+
+이건 방금 했잖아. 다시 필요해? 
+
+
+===
+
+# config.py
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# =========================
+# Risk / Bankroll
+# =========================
+NHL_TOTAL_DAILY_RISK = 100
+
+
+# =========================
+# Paths
+# =========================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+MODEL_DIR = os.path.join(BASE_DIR, "models")
+
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+NHL_TRAIN_PATH = os.path.join(DATA_DIR, "nhl_train.csv")
+NHL_TODAY_PATH = os.path.join(DATA_DIR, "nhl_today.csv")
+
+NHL_MODEL_PATH = os.path.join(MODEL_DIR, "nhl_xgb_win.pkl")
+NHL_MARGIN_MODEL_PATH = os.path.join(MODEL_DIR, "nhl_xgb_margin.pkl")
+
+
+
+# =========================
+# Email
+# =========================
+EMAIL_HOST = os.getenv("EMAIL_HOST")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_TO = os.getenv("EMAIL_TO")
+
+
+# =========================
+# Odds API
+# =========================
+ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
+ODDS_API_BASE_URL = os.getenv("ODDS_API_BASE_URL")
+
+
+# =========================
+# balldontlie API 
+# =========================
+BALLDONTLIE_API_KEY = os.getenv("BALLDONTLIE_API_KEY", "")
+BALLDONTLIE_BASE_URL = os.getenv("BALLDONTLIE_BASE_URL")
+
+NBA_BASE_URL = f"{BALLDONTLIE_BASE_URL}/nba/v1"
+NHL_BASE_URL = f"{BALLDONTLIE_BASE_URL}/nhl/v1"
+
+
+def _get_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name, "")
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+===============
+
+# odds_client.py
+
 from __future__ import annotations
+from typing import Dict, Any, Optional
 import re
+import requests
+import pandas as pd
 
-# NHL canonical 32 team abbreviations (3-letter)
-ABBR = {
-    "ANA","BOS","BUF","CAR","CBJ","CGY","CHI","COL","DAL","DET","EDM","FLA",
-    "LAK","MIN","MTL","NJD","NSH","NYI","NYR","OTT","PHI","PIT","SEA","SJS",
-    "STL","TBL","TOR","VAN","VGK","WPG","WSH","UTA"
-}
+from config import (
+    ODDS_API_KEY,
+    ODDS_API_BASE_URL,
+    BALLDONTLIE_API_KEY,
+    BALLDONTLIE_BASE_URL,
+)
 
-ALIASES = {
-    # --- ANA (Ducks) ---
-    "ANA":"ANA","ANH":"ANA","ANAHEIM":"ANA","DUCKS":"ANA","ANAHEIM DUCKS":"ANA",
 
-    # --- BOS (Bruins) ---
-    "BOS":"BOS","BOSTON":"BOS","BRUINS":"BOS","BOSTON BRUINS":"BOS",
+def _norm_team_name(s: str) -> str:
+    """
+    팀명 문자열 정규화 (Odds API / balldontlie 간 표기 차이 흡수)
+    """
+    s = (s or "").lower().strip()
+    s = s.replace(".", " ")
+    s = re.sub(r"[-_/]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
 
-    # --- BUF (Sabres) ---
-    "BUF":"BUF","BUFFALO":"BUF","SABRES":"BUF","SABERS":"BUF","BUFFALO SABRES":"BUF",
+    # 흔한 별칭 처리
+    s = s.replace("l a ", "la ")
+    s = s.replace("los angeles", "la")
+    s = s.replace("new york", "ny")
 
-    # --- CAR (Hurricanes) ---
-    "CAR":"CAR","CAROLINA":"CAR","HURRICANES":"CAR","CANES":"CAR","CAROLINA HURRICANES":"CAR",
-
-    # --- CBJ (Blue Jackets) ---
-    "CBJ":"CBJ","CLB":"CBJ","COLUMBUS":"CBJ","BLUE JACKETS":"CBJ","BLUEJACKETS":"CBJ",
-    "COLUMBUS BLUE JACKETS":"CBJ","COLUMBUS BLUEJACKETS":"CBJ",
-
-    # --- CGY (Flames) ---
-    "CGY":"CGY","CALGARY":"CGY","FLAMES":"CGY","CALGARY FLAMES":"CGY",
-
-    # --- CHI (Blackhawks) ---
-    "CHI":"CHI","CHICAGO":"CHI","BLACKHAWKS":"CHI","BLACK HAWKS":"CHI","CHICAGO BLACKHAWKS":"CHI",
-
-    # --- COL (Avalanche) ---
-    "COL":"COL","COLORADO":"COL","AVALANCHE":"COL","AVS":"COL","COLORADO AVALANCHE":"COL",
-
-    # --- DAL (Stars) ---
-    "DAL":"DAL","DALLAS":"DAL","STARS":"DAL","DALLAS STARS":"DAL",
-
-    # --- DET (Red Wings) ---
-    "DET":"DET","DETROIT":"DET","RED WINGS":"DET","REDWINGS":"DET","WINGS":"DET","DETROIT RED WINGS":"DET",
-
-    # --- EDM (Oilers) ---
-    "EDM":"EDM","EDMONTON":"EDM","OILERS":"EDM","EDMONTON OILERS":"EDM",
-
-    # --- FLA (Panthers) ---
-    "FLA":"FLA","FLORIDA":"FLA","PANTHERS":"FLA","FLORIDA PANTHERS":"FLA",
-
-    # --- LAK (Kings) ---
-    "LAK":"LAK","LA":"LAK","L.A.":"LAK","LOS ANGELES":"LAK",
-    "KINGS":"LAK","LA KINGS":"LAK","L.A. KINGS":"LAK","LOS ANGELES KINGS":"LAK",
-
-    # --- MIN (Wild) ---
-    "MIN":"MIN","MINNESOTA":"MIN","WILD":"MIN","MINNESOTA WILD":"MIN",
-
-    # --- MTL (Canadiens) ---
-    "MTL":"MTL","MON":"MTL","MONTREAL":"MTL","CANADIENS":"MTL","HABS":"MTL","MONTREAL CANADIENS":"MTL",
-
-    # --- NJD (Devils) ---
-    "NJD":"NJD","NJ":"NJD","N.J.":"NJD","NEW JERSEY":"NJD",
-    "DEVILS":"NJD","NEW JERSEY DEVILS":"NJD",
-
-    # --- NSH (Predators) ---
-    "NSH":"NSH","NAS":"NSH","NASHVILLE":"NSH","PREDATORS":"NSH","PREDS":"NSH","NASHVILLE PREDATORS":"NSH",
-
-    # --- NYI (Islanders) ---
-    "NYI":"NYI","NY ISLANDERS":"NYI","N.Y. ISLANDERS":"NYI","NEW YORK ISLANDERS":"NYI",
-    "ISLANDERS":"NYI","ISLES":"NYI",
-
-    # --- NYR (Rangers) ---
-    "NYR":"NYR","NY RANGERS":"NYR","N.Y. RANGERS":"NYR","NEW YORK RANGERS":"NYR",
-    "RANGERS":"NYR",
-
-    # --- OTT (Senators) ---
-    "OTT":"OTT","OTTAWA":"OTT","SENATORS":"OTT","SENS":"OTT","OTTAWA SENATORS":"OTT",
-
-    # --- PHI (Flyers) ---
-    "PHI":"PHI","PHILADELPHIA":"PHI","FLYERS":"PHI","PHILADELPHIA FLYERS":"PHI",
-
-    # --- PIT (Penguins) ---
-    "PIT":"PIT","PITTSBURGH":"PIT","PENGUINS":"PIT","PENS":"PIT","PITTSBURGH PENGUINS":"PIT",
-
-    # --- SEA (Kraken) ---
-    "SEA":"SEA","SEATTLE":"SEA","KRAKEN":"SEA","SEATTLE KRAKEN":"SEA",
-
-    # --- SJS (Sharks) ---
-    "SJS":"SJS","SJ":"SJS","S.J.":"SJS","SAN JOSE":"SJS","SANJOSE":"SJS",
-    "SHARKS":"SJS","SAN JOSE SHARKS":"SJS","SANJOSE SHARKS":"SJS",
-
-    # --- STL (Blues) ---
-    "STL":"STL","ST. LOUIS":"STL","ST LOUIS":"STL","SAINT LOUIS":"STL",
-    "BLUES":"STL","ST LOUIS BLUES":"STL","ST. LOUIS BLUES":"STL",
-
-    # --- TBL (Lightning) ---
-    "TBL":"TBL","TB":"TBL","T.B.":"TBL","TAMPA BAY":"TBL","TAMPABAY":"TBL",
-    "LIGHTNING":"TBL","BOLTS":"TBL","TAMPA BAY LIGHTNING":"TBL","TAMPABAY LIGHTNING":"TBL",
-
-    # --- TOR (Maple Leafs) ---
-    "TOR":"TOR","TORONTO":"TOR","MAPLE LEAFS":"TOR","MAPLELEAFS":"TOR","LEAFS":"TOR",
-    "TORONTO MAPLE LEAFS":"TOR",
-
-    # --- VAN (Canucks) ---
-    "VAN":"VAN","VANCOUVER":"VAN","CANUCKS":"VAN","VANCOUVER CANUCKS":"VAN",
-
-    # --- VGK (Golden Knights) ---
-    "VGK":"VGK","VEGAS":"VGK","LAS VEGAS":"VGK","GOLDEN KNIGHTS":"VGK","GOLDENKNIGHTS":"VGK",
-    "VEGAS GOLDEN KNIGHTS":"VGK","LAS VEGAS GOLDEN KNIGHTS":"VGK","KNIGHTS":"VGK",
-
-    # --- WPG (Jets) ---
-    "WPG":"WPG","WINNIPEG":"WPG","JETS":"WPG","WINNIPEG JETS":"WPG",
-
-    # --- WSH (Capitals) ---
-    "WSH":"WSH","WAS":"WSH","WASHINGTON":"WSH","CAPITALS":"WSH","CAPS":"WSH","WASHINGTON CAPITALS":"WSH",
-
-    # --- UTA (Utah Mammoth) ---
-    # 실전 표기 변형: Utah / Utah HC / Utah Hockey Club / Utah Mammoth / Mammoth 등
-    "UTA":"UTA",
-    "UTAH":"UTA",
-    "UTAH HC":"UTA","UTAH H.C.":"UTA",
-    "UTAH HOCKEY CLUB":"UTA","UTAHHC":"UTA","UTAHHOCKEYCLUB":"UTA",
-    "UTAH MAMMOTH":"UTA","UTAH MAMMOTHS":"UTA",
-    "MAMMOTH":"UTA","MAMMOTHS":"UTA",
-}
-
-FULLNAME = {
-    "ANAHEIMDUCKS":"ANA",
-    "BOSTONBRUINS":"BOS",
-    "BUFFALOSABRES":"BUF",
-    "CAROLINAHURRICANES":"CAR",
-    "COLUMBUSBLUEJACKETS":"CBJ",
-    "CALGARYFLAMES":"CGY",
-    "CHICAGOBLACKHAWKS":"CHI",
-    "COLORADOAVALANCHE":"COL",
-    "DALLASSTARS":"DAL",
-    "DETROITREDWINGS":"DET",
-    "EDMONTONOILERS":"EDM",
-    "FLORIDAPANTHERS":"FLA",
-    "LOSANGELESKINGS":"LAK",
-    "MINNESOTAWILD":"MIN",
-    "MONTREALCANADIENS":"MTL",
-    "NEWJERSEYDEVILS":"NJD",
-    "NASHVILLEPREDATORS":"NSH",
-    "NEWYORKISLANDERS":"NYI",
-    "NEWYORKRANGERS":"NYR",
-    "OTTAWASENATORS":"OTT",
-    "PHILADELPHIAFLYERS":"PHI",
-    "PITTSBURGHPENGUINS":"PIT",
-    "SEATTLEKRAKEN":"SEA",
-    "SANJOSESHARKS":"SJS",
-    "STLOUISBLUES":"STL",
-    "TAMPABAYLIGHTNING":"TBL",
-    "TORONTOMAPLELEAFS":"TOR",
-    "VANCOUVERCANUCKS":"VAN",
-    "VEGASGOLDENKNIGHTS":"VGK",
-    "WINNIPEGJETS":"WPG",
-    "WASHINGTONCAPITALS":"WSH",
-
-    # Utah Mammoth
-    "UTAHMAMMOTH":"UTA",
-    "UTAHMAMMOTHS":"UTA",
-    "UTAHHOCKEYCLUB":"UTA",
-}
-
-def _norm(s: str) -> str:
-    s = s.strip().upper()
-    s = re.sub(r"\s+", " ", s)
     return s
 
-def _norm_compact(s: str) -> str:
-    s = s.strip().upper()
-    s = re.sub(r"[^A-Z0-9]", "", s)
-    return s
 
-def to_abbr(x) -> str | None:
+class OddsAPIClient:
     """
-    Robust team -> canonical NHL ABBR (32 teams).
-    Accepts: already-abbr, "NY Rangers", "New York Rangers", "Rangers",
-             "Tampa Bay Lightning", "TB", "Bolts", "Vegas", "Golden Knights",
-             "Utah Mammoth", etc.
+    The Odds API 래퍼 (NHL moneyline odds)
+    + balldontlie teams를 이용해 team_abbr 매핑까지 생성
     """
-    if x is None:
-        return None
 
-    s = str(x)
-    if not s.strip():
-        return None
+    def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
+        self.api_key = api_key or ODDS_API_KEY
+        self.base_url = (base_url or ODDS_API_BASE_URL).rstrip("/")
+        if not self.api_key:
+            raise ValueError("ODDS_API_KEY is missing. Set it in your .env.")
 
-    # 1) exact-like
-    s1 = _norm(s)
-    if s1 in ABBR:
-        return s1
-    if s1 in ALIASES:
-        return ALIASES[s1]
+        # balldontlie (팀/경기 매핑용)
+        self.bdl_key = BALLDONTLIE_API_KEY
+        self.bdl_base = (BALLDONTLIE_BASE_URL or "").rstrip("/")
+        if not self.bdl_key or not self.bdl_base:
+            raise ValueError("BALLDONTLIE_API_KEY / BALLDONTLIE_BASE_URL missing (needed for team mapping).")
 
-    # 2) compact normalize
-    sc = _norm_compact(s)
-    if sc in ABBR:
-        return sc
-    if sc in ALIASES:
-        return ALIASES[sc]
-    if sc in FULLNAME:
-        return FULLNAME[sc]
+        self._team_map_norm_to_abbr: Optional[Dict[str, str]] = None
 
-    # 3) last chance: pattern heuristics
-    if "NEWYORK" in sc and "RANG" in sc:
-        return "NYR"
-    if "NEWYORK" in sc and "ISLAND" in sc:
-        return "NYI"
-    if "TAMPABAY" in sc or sc == "TB":
-        return "TBL"
-    if "SANJOSE" in sc:
-        return "SJS"
-    if "STLOUIS" in sc or "SAINTLOUIS" in sc:
-        return "STL"
-    if "LOSANGELES" in sc and "KINGS" in sc:
-        return "LAK"
-    if "VEGAS" in sc or "GOLDENKNIGHTS" in sc:
-        return "VGK"
-    if "UTAH" in sc or "MAMMOTH" in sc:
-        return "UTA"
+    # -------------------------
+    # Odds API
+    # -------------------------
+    def _get_odds(self, path: str, params: Dict[str, Any]) -> Any:
+        url = f"{self.base_url}{path}"
+        params = params.copy()
+        params["apiKey"] = self.api_key
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
 
-    return None
+    # -------------------------
+    # balldontlie
+    # -------------------------
+    def _get_bdl(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        url = f"{self.bdl_base}{path}"
+        headers = {"Authorization": self.bdl_key, "Accept": "application/json"}
+        resp = requests.get(url, params=(params or {}), headers=headers, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _build_team_map(self) -> Dict[str, str]:
+        """
+        returns: { normalized_team_name: "BOS" } 같은 형태
+        NOTE: NHL에서도 /v1/teams 가 동일 구조로 내려온다는 전제 (balldontlie 공용)
+        """
+        if self._team_map_norm_to_abbr is not None:
+            return self._team_map_norm_to_abbr
+
+        data = self._get_bdl("/v1/teams", params={"per_page": 200})
+        teams = data.get("data", []) or []
+
+        m: Dict[str, str] = {}
+        for t in teams:
+            full_name = t.get("full_name") or ""
+            abbr = t.get("abbreviation") or ""
+            if not abbr:
+                continue
+
+            m[_norm_team_name(full_name)] = abbr
+
+            city = t.get("city") or ""
+            if city:
+                nickname = full_name.replace(city, "").strip()
+                if nickname:
+                    m[_norm_team_name(f"{city} {nickname}")] = abbr
+
+        # ✅ NBA에 있던 LA/NY 하드코딩은 NHL엔 불필요 (유지하면 오염될 수 있음)
+        self._team_map_norm_to_abbr = m
+        return m
+
+    def _to_abbr(self, team_name: str) -> str:
+        """
+        Odds API 팀명 -> ABBR
+        매칭 실패하면 바로 에러로 터뜨려서 '조용히 누락'되는 상황을 방지
+        """
+        m = self._build_team_map()
+        key = _norm_team_name(team_name)
+        abbr = m.get(key)
+        if abbr:
+            return abbr
+        raise KeyError(f"[ODDS TEAM MAP FAIL] Unknown team name: '{team_name}' (norm='{key}')")
+
+    # -------------------------
+    # public API
+    # -------------------------
+    def fetch_nhl_moneyline_odds(self, regions: str = "us", attach_game_id: bool = True) -> pd.DataFrame:
+        """
+        NHL moneyline odds 가져오기 (The Odds API)
+        - sport key: icehockey_nhl
+        - markets: h2h (moneyline)
+        """
+        data = self._get_odds(
+            "/sports/icehockey_nhl/odds",
+            params={
+                "regions": regions,
+                "markets": "h2h",
+                "oddsFormat": "american",
+                "dateFormat": "iso",
+            },
+        )
+
+        rows = []
+        for event in data:
+            event_id = event["id"]
+            home_team = event["home_team"]
+            away_team = event["away_team"]
+            start_time = event.get("commence_time")  # ISO string
+
+            home_abbr = self._to_abbr(home_team)
+            away_abbr = self._to_abbr(away_team)
+
+            for bk in event.get("bookmakers", []):
+                bookmaker = bk.get("title")
+                for mkt in bk.get("markets", []):
+                    if mkt.get("key") != "h2h":
+                        continue
+                    for outcome in mkt.get("outcomes", []):
+                        team = outcome.get("name")
+                        american = outcome.get("price")
+                        if team is None or american is None:
+                            continue
+
+                        team_abbr = self._to_abbr(team)
+
+                        rows.append(
+                            {
+                                "event_id": event_id,
+                                "start_time": start_time,
+                                "home_team": home_team,
+                                "away_team": away_team,
+                                "home_team_abbr": home_abbr,
+                                "away_team_abbr": away_abbr,
+                                "bookmaker": bookmaker,
+                                "team": team,
+                                "team_abbr": team_abbr,
+                                "american_odds": american,
+                            }
+                        )
+
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+
+        df["start_time"] = pd.to_datetime(df["start_time"], utc=True, errors="coerce")
+
+        if attach_game_id:
+            df = self._attach_game_id(df, league="nhl")
+
+        return df
+
+    # -------------------------
+    # attach game_id via balldontlie games
+    # -------------------------
+    def _commence_to_utc_date_str(self, commence_time) -> str:
+        if commence_time is None or (isinstance(commence_time, float) and pd.isna(commence_time)):
+            raise ValueError("commence_time missing")
+        dt = pd.to_datetime(commence_time, utc=True, errors="raise")
+        return dt.date().isoformat()
+
+    def _fetch_bdl_games_by_dates(self, dates: list[str], league: str) -> pd.DataFrame:
+        """
+        balldontlie games를 날짜 리스트로 가져와서 DataFrame 반환
+
+        league:
+          - "nba" or "nhl"
+        """
+        all_rows = []
+        for d in sorted(set(dates)):
+            # balldontlie: /v1/games?dates[]=YYYY-MM-DD&per_page=100
+            # NOTE: NHL에서도 동일 경로라고 가정. 만약 리그별 prefix가 필요하면 여기서만 수정하면 됨.
+            data = self._get_bdl("/v1/games", params={"dates[]": d, "per_page": 200})
+            games = data.get("data", []) or []
+
+            for g in games:
+                # --- NHL/NBA 구조 차이 방어 ---
+                # NBA: home_team / visitor_team
+                # NHL: home_team / away_team (가능성 높음)
+                home = (g.get("home_team") or {})
+                away = (g.get("away_team") or g.get("visitor_team") or {})
+
+                all_rows.append(
+                    {
+                        "game_id": g.get("id"),
+                        "date": d,
+                        "home_team_abbr": (home.get("abbreviation") or "").upper(),
+                        "away_team_abbr": (away.get("abbreviation") or "").upper(),
+                    }
+                )
+
+        out = pd.DataFrame(all_rows)
+        if not out.empty:
+            out["home_team_abbr"] = out["home_team_abbr"].astype(str).str.upper()
+            out["away_team_abbr"] = out["away_team_abbr"].astype(str).str.upper()
+        return out
+
+    def _attach_game_id(self, odds_rows: pd.DataFrame, league: str = "nhl") -> pd.DataFrame:
+        """
+        odds_rows (event_id 단위) -> balldontlie 기준 game_id 매핑
+        매핑 우선순위:
+          1) (date_utc, home_abbr, away_abbr)
+          2) (date_utc +/- 1일, home_abbr, away_abbr)  # 날짜 경계/타임존 방어
+        """
+        df = odds_rows.copy()
+        if df.empty:
+            df["game_id"] = None
+            return df
+
+        if "start_time" not in df.columns:
+            raise ValueError("odds_rows missing start_time")
+
+        df["date_utc"] = df["start_time"].apply(self._commence_to_utc_date_str)
+
+        dates = df["date_utc"].dropna().unique().tolist()
+        dates_plus = set(dates)
+        for d in dates:
+            dt = pd.to_datetime(d)
+            dates_plus.add((dt - pd.Timedelta(days=1)).date().isoformat())
+            dates_plus.add((dt + pd.Timedelta(days=1)).date().isoformat())
+
+        bdl_games = self._fetch_bdl_games_by_dates(sorted(dates_plus), league=league)
+        if bdl_games.empty:
+            df["game_id"] = None
+            print("[DEBUG][ODDS][BDL_GAMES] empty - cannot attach game_id")
+            return df
+
+        df["home_team_abbr"] = df["home_team_abbr"].astype(str).str.upper()
+        df["away_team_abbr"] = df["away_team_abbr"].astype(str).str.upper()
+
+        key_cols = ["date_utc", "home_team_abbr", "away_team_abbr"]
+        bdl_map = bdl_games.rename(columns={"date": "date_utc"})[
+            ["date_utc", "home_team_abbr", "away_team_abbr", "game_id"]
+        ]
+
+        df = df.merge(bdl_map, how="left", on=key_cols)
+
+        miss = df["game_id"].isna()
+        if miss.any():
+            tmp = df.loc[miss, key_cols].copy()
+            tmp["date_dt"] = pd.to_datetime(tmp["date_utc"])
+            candidates = []
+            for shift in (-1, 1):
+                t2 = tmp.copy()
+                t2["date_utc"] = (t2["date_dt"] + pd.Timedelta(days=shift)).dt.date.astype(str)
+                candidates.append(t2[key_cols])
+            retry_keys = pd.concat(candidates, ignore_index=True).drop_duplicates()
+
+            retry = retry_keys.merge(bdl_map, how="left", on=key_cols).dropna(subset=["game_id"])
+            if not retry.empty:
+                retry["k"] = retry["date_utc"] + "|" + retry["home_team_abbr"] + "|" + retry["away_team_abbr"]
+                retry_map = dict(zip(retry["k"], retry["game_id"]))
+
+                def _lookup_game_id(row):
+                    base_date = pd.to_datetime(row["date_utc"])
+                    for shift in (0, -1, 1):
+                        d = (base_date + pd.Timedelta(days=shift)).date().isoformat()
+                        k = f"{d}|{row['home_team_abbr']}|{row['away_team_abbr']}"
+                        if k in retry_map:
+                            return retry_map[k]
+                    return None
+
+                df.loc[miss, "game_id"] = df.loc[miss].apply(_lookup_game_id, axis=1)
+
+        null_rate = df["game_id"].isna().mean()
+        print(f"[DEBUG][ODDS][ATTACH_GAME_ID] rows={len(df)} null_rate={null_rate:.3f}")
+
+        df.drop(columns=["date_utc"], errors="ignore", inplace=True)
+        return df
 
 
-
----
-
+====================
 
 
+# nhl_api_client.py
 
-# nba_team_abbr.py
 from __future__ import annotations
-import re
 
-# canonical 30 team abbr
-ABBR = {
-    "ATL","BOS","BKN","CHA","CHI","CLE","DAL","DEN","DET","GSW","HOU","IND",
-    "LAC","LAL","MEM","MIA","MIL","MIN","NOP","NYK","OKC","ORL","PHI","PHX",
-    "POR","SAC","SAS","TOR","UTA","WAS"
-}
+from typing import List, Dict, Any, Optional, Union
+from datetime import date, datetime
+import time
 
-# ---- hardcoded aliases (provider별/사람표기별 다 흡수)
-# 규칙:
-# - key는 _norm() 기준(대문자 + 공백 정리) 또는 _norm_compact()로도 잡힘
-# - nickname-only / city-only / 흔한 3글자 변형까지 모두 포함
-ALIASES = {
-    # --- ATL ---
-    "ATL":"ATL","AT":"ATL","ATLANTA":"ATL","HAWKS":"ATL","ATLANTA HAWKS":"ATL",
+import requests
+import pandas as pd
 
-    # --- BOS ---
-    "BOS":"BOS","BOSTON":"BOS","CELTICS":"BOS","BOSTON CELTICS":"BOS",
-
-    # --- BKN ---
-    "BKN":"BKN","BRK":"BKN","BROOKLYN":"BKN","NETS":"BKN","BROOKLYN NETS":"BKN",
-
-    # --- CHA ---
-    "CHA":"CHA","CHO":"CHA","CHARLOTTE":"CHA","HORNETS":"CHA","CHARLOTTE HORNETS":"CHA",
-
-    # --- CHI ---
-    "CHI":"CHI","CHICAGO":"CHI","BULLS":"CHI","CHICAGO BULLS":"CHI",
-
-    # --- CLE ---
-    "CLE":"CLE","CLEVELAND":"CLE","CAVALIERS":"CLE","CAVS":"CLE","CLEVELAND CAVALIERS":"CLE",
-
-    # --- DAL ---
-    "DAL":"DAL","DALLAS":"DAL","MAVERICKS":"DAL","MAVS":"DAL","DALLAS MAVERICKS":"DAL",
-
-    # --- DEN ---
-    "DEN":"DEN","DENVER":"DEN","NUGGETS":"DEN","DENVER NUGGETS":"DEN",
-
-    # --- DET ---
-    "DET":"DET","DETROIT":"DET","PISTONS":"DET","DETROIT PISTONS":"DET",
-
-    # --- GSW ---
-    "GSW":"GSW","GS":"GSW","GOLDEN STATE":"GSW","GOLDENSTATE":"GSW",
-    "WARRIORS":"GSW","GOLDEN STATE WARRIORS":"GSW","GOLDENSTATEWARRIORS":"GSW",
-
-    # --- HOU ---
-    "HOU":"HOU","HOUSTON":"HOU","ROCKETS":"HOU","HOUSTON ROCKETS":"HOU",
-
-    # --- IND ---
-    "IND":"IND","INDIANA":"IND","PACERS":"IND","INDIANA PACERS":"IND",
-
-    # --- LAC ---
-    "LAC":"LAC","LA CLIPPERS":"LAC","L.A. CLIPPERS":"LAC","LOS ANGELES CLIPPERS":"LAC",
-    "LOSANGELESCLIPPERS":"LAC","CLIPPERS":"LAC",
-
-    # --- LAL ---
-    "LAL":"LAL","LA LAKERS":"LAL","L.A. LAKERS":"LAL","LOS ANGELES LAKERS":"LAL",
-    "LOSANGELESLAKERS":"LAL","LAKERS":"LAL",
-
-    # --- MEM ---
-    "MEM":"MEM","MEMPHIS":"MEM","GRIZZLIES":"MEM","GRIZZ":"MEM","MEMPHIS GRIZZLIES":"MEM",
-
-    # --- MIA ---
-    "MIA":"MIA","MIAMI":"MIA","HEAT":"MIA","MIAMI HEAT":"MIA",
-
-    # --- MIL ---
-    "MIL":"MIL","MILWAUKEE":"MIL","BUCKS":"MIL","MILWAUKEE BUCKS":"MIL",
-
-    # --- MIN ---
-    "MIN":"MIN","MINNESOTA":"MIN","TIMBERWOLVES":"MIN","WOLVES":"MIN",
-    "MINNESOTA TIMBERWOLVES":"MIN",
-
-    # --- NOP ---
-    "NOP":"NOP","NO":"NOP","N.O.":"NOP","NEW ORLEANS":"NOP","NEWORLEANS":"NOP",
-    "PELICANS":"NOP","PELS":"NOP","NEW ORLEANS PELICANS":"NOP","NEWORLEANSPELICANS":"NOP",
-
-    # --- NYK ---
-    "NYK":"NYK","NY":"NYK","NEW YORK":"NYK","NEWYORK":"NYK",
-    "KNICKS":"NYK","NY KNICKS":"NYK","NEW YORK KNICKS":"NYK","NEWYORKKNICKS":"NYK",
-
-    # --- OKC ---
-    "OKC":"OKC","OKLAHOMA CITY":"OKC","OKLAHOMACITY":"OKC","THUNDER":"OKC",
-    "OKLAHOMA CITY THUNDER":"OKC","OKLAHOMACITYTHUNDER":"OKC",
-
-    # --- ORL ---
-    "ORL":"ORL","ORLANDO":"ORL","MAGIC":"ORL","ORLANDO MAGIC":"ORL",
-
-    # --- PHI ---
-    "PHI":"PHI","PHILA":"PHI","PHILADELPHIA":"PHI",
-    "76ERS":"PHI","SIXERS":"PHI","PHILADELPHIA 76ERS":"PHI","PHILADELPHIA76ERS":"PHI",
-
-    # --- PHX ---
-    "PHX":"PHX","PHO":"PHX","PHOENIX":"PHX","SUNS":"PHX","PHOENIX SUNS":"PHX",
-
-    # --- POR ---
-    "POR":"POR","PORTLAND":"POR",
-    "TRAILBLAZERS":"POR","TRAIL BLAZERS":"POR","BLAZERS":"POR",
-    "PORTLAND TRAIL BLAZERS":"POR","PORTLANDTRAILBLAZERS":"POR",
-
-    # --- SAC ---
-    "SAC":"SAC","SACRAMENTO":"SAC","KINGS":"SAC","SACRAMENTO KINGS":"SAC",
-
-    # --- SAS ---
-    "SAS":"SAS","SA":"SAS","SAN ANTONIO":"SAS","SANANTONIO":"SAS",
-    "SPURS":"SAS","SAN ANTONIO SPURS":"SAS","SANANTONIOSPURS":"SAS",
-
-    # --- TOR ---
-    "TOR":"TOR","TORONTO":"TOR","RAPTORS":"TOR","TORONTO RAPTORS":"TOR",
-
-    # --- UTA ---
-    "UTA":"UTA","UTAH":"UTA","JAZZ":"UTA","UTAH JAZZ":"UTA",
-
-    # --- WAS ---
-    "WAS":"WAS","WSH":"WAS","WASHINGTON":"WAS","WIZARDS":"WAS","WASHINGTON WIZARDS":"WAS",
-}
+from config import BALLDONTLIE_API_KEY, BALLDONTLIE_BASE_URL
 
 
-
-# also accept full team names (최소 핵심)
-FULLNAME = {
-    "ATLANTAHAWKS":"ATL",
-    "BOSTONCELTICS":"BOS",
-    "BROOKLYNNETS":"BKN",
-    "CHARLOTTEHORNETS":"CHA",
-    "CHICAGOBULLS":"CHI",
-    "CLEVELANDCAVALIERS":"CLE",
-    "DALLASMAVERICKS":"DAL",
-    "DENVERNUGGETS":"DEN",
-    "DETROITPISTONS":"DET",
-    "GOLDENSTATEWARRIORS":"GSW",
-    "HOUSTONROCKETS":"HOU",
-    "INDIANAPACERS":"IND",
-    "LOSANGELESCLIPPERS":"LAC",
-    "LOSANGELESLAKERS":"LAL",
-    "MEMPHISGRIZZLIES":"MEM",
-    "MIAMIHEAT":"MIA",
-    "MILWAUKEEBUCKS":"MIL",
-    "MINNESOTATIMBERWOLVES":"MIN",
-    "NEWORLEANSPELICANS":"NOP",
-    "NEWYORKKNICKS":"NYK",
-    "OKLAHOMACITYTHUNDER":"OKC",
-    "ORLANDOMAGIC":"ORL",
-    "PHILADELPHIA76ERS":"PHI",
-    "PHOENIXSUNS":"PHX",
-    "PORTLANDTRAILBLAZERS":"POR",
-    "SACRAMENTOKINGS":"SAC",
-    "SANANTONIOSPURS":"SAS",
-    "TORONTORAPTORS":"TOR",
-    "UTAHJAZZ":"UTA",
-    "WASHINGTONWIZARDS":"WAS",
-}
-
-def _norm(s: str) -> str:
-    s = s.strip().upper()
-    s = re.sub(r"\s+", " ", s)
-    return s
-
-def _norm_compact(s: str) -> str:
-    # remove punctuation/spaces for robust matching
-    s = s.strip().upper()
-    s = re.sub(r"[^A-Z0-9]", "", s)
-    return s
-
-def to_abbr(x) -> str | None:
+class NHLDataClient:
     """
-    Robust team -> canonical ABBR (30 teams).
-    Accepts: already-abbr, "LA Clippers", "New York Knicks", "Trail Blazers", "76ers" 등.
+    balldontlie NHL API 래퍼
+      - 여러 시즌 게임 히스토리 가져오기
+      - 특정 날짜 게임 가져오기 (today_games 용)
+
+    NOTE:
+      - balldontlie 응답에서 away 팀 키가 "away_team" 또는 "visitor_team"일 수 있어서 둘 다 지원
+      - base_url/BALLDONTLIE_BASE_URL 세팅에 따라 path가 /v1/games 또는 /nhl/v1/games 형태일 수 있음
+        (1차 포팅은 /v1/games 유지)
     """
-    if x is None:
-        return None
 
-    s = str(x)
-    if not s.strip():
-        return None
+    def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
+        self.api_key = api_key or BALLDONTLIE_API_KEY
+        self.base_url = (base_url or BALLDONTLIE_BASE_URL).rstrip("/")
+        if not self.api_key:
+            raise ValueError("BALLDONTLIE_API_KEY is missing. Set it in your .env.")
 
-    # 1) exact-like
-    s1 = _norm(s)
-    if s1 in ABBR:
-        return s1
-    if s1 in ALIASES:
-        return ALIASES[s1]
+    def fetch_games_by_date_range_df(
+        self,
+        start_date: date,
+        end_date: date,
+        per_page: int = 100,
+    ) -> pd.DataFrame:
+        """
+        [start_date, end_date] 범위 게임을 전부 가져온다
+        """
+        start_str = start_date.strftime("%Y-%m-%d")
+        end_str = end_date.strftime("%Y-%m-%d")
 
-    # 2) compact normalize
-    sc = _norm_compact(s)
-    if sc in ABBR:
-        return sc
-    if sc in ALIASES:
-        return ALIASES[sc]
-    if sc in FULLNAME:
-        return FULLNAME[sc]
+        rows = []
+        cursor = None
+        page = 1
 
-    # 3) last chance: try common patterns
-    # e.g. "New York" -> NYK, "Oklahoma City" -> OKC
-    if "NEWYORK" in sc:
-        return "NYK"
-    if "OKLAHOMA" in sc:
-        return "OKC"
-    if "LOSANGELES" in sc and "CLIP" in sc:
-        return "LAC"
-    if "LOSANGELES" in sc and "LAK" in sc:
-        return "LAL"
+        while True:
+            params = {"start_date": start_str, "end_date": end_str, "per_page": per_page}
+            if cursor is not None:
+                params["cursor"] = cursor
+            else:
+                params["page"] = page
 
-    return None
+            data = self._get("/v1/games", params=params)
+            games = data.get("data", []) or []
+            if not games:
+                break
+
+            for g in games:
+                rows.append(self._normalize_game_row(g))
+
+            meta = data.get("meta", {}) or {}
+            next_cursor = meta.get("next_cursor", None)
+
+            if next_cursor is not None:
+                if next_cursor == cursor:
+                    break
+                cursor = next_cursor
+                continue
+
+            total_pages = meta.get("total_pages", page)
+            if page >= total_pages:
+                break
+            page += 1
+
+        df = pd.DataFrame(rows)
+        if not df.empty and "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        return df
+
+    def _get(
+        self,
+        path: str,
+        params: Optional[Dict[str, Any]] = None,
+        max_retries: int = 3,
+    ) -> Dict[str, Any]:
+        """
+        공통 GET 래퍼
+        - v1 엔드포인트: Authorization 헤더에 Bearer 없이 API 키 그대로
+        """
+        url = f"{self.base_url}{path}"
+        headers: Dict[str, str] = {
+            "Authorization": self.api_key,
+            "Accept": "application/json",
+        }
+        params = params or {}
+
+        last_exc: Optional[Exception] = None
+
+        for i in range(max_retries):
+            try:
+                resp = requests.get(url, params=params, headers=headers, timeout=30)
+
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after is not None:
+                        try:
+                            wait_sec = int(retry_after)
+                        except ValueError:
+                            wait_sec = 10
+                    else:
+                        wait_sec = 5 * (2 ** i)
+
+                    print(
+                        f"[NHL API] 429 Too Many Requests. "
+                        f"Sleep {wait_sec}s and retry ({i+1}/{max_retries})..."
+                    )
+                    time.sleep(wait_sec)
+                    continue
+
+                resp.raise_for_status()
+                return resp.json()
+
+            except Exception as e:
+                last_exc = e
+                if i < max_retries - 1:
+                    time.sleep(1.5 * (2 ** i))
+                else:
+                    break
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("Unknown error in _get()")
+
+    @staticmethod
+    def _normalize_game_row(g: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        balldontlie game dict -> downstream에서 쓰기 좋은 표준 row로 변환
+
+        NHL/NBA 차이 방어:
+          - home_team: 동일
+          - away 팀: away_team 또는 visitor_team
+          - score 키도 리그별로 다를 수 있어 fallback 처리
+        """
+        home = g.get("home_team") or {}
+
+        # ✅ NHL 가능성: away_team
+        away = g.get("away_team") or g.get("visitor_team") or {}
+
+        # ✅ 점수 키도 방어 (NBA: home_team_score / visitor_team_score)
+        home_score = g.get("home_team_score", g.get("home_score"))
+        away_score = g.get("away_team_score", g.get("visitor_team_score", g.get("away_score")))
+
+        return {
+            "game_id": g.get("id"),
+            "date": g.get("date"),
+            "season": g.get("season"),
+
+            "home_team_id": home.get("id"),
+            "away_team_id": away.get("id"),
+            "home_team_abbr": home.get("abbreviation"),
+            "away_team_abbr": away.get("abbreviation"),
+
+            "home_team": home.get("full_name"),
+            "away_team": away.get("full_name"),
+
+            "home_score": home_score,
+            "away_score": away_score,
+
+            "status": g.get("status"),
+            "postseason": g.get("postseason"),
+            "period": g.get("period"),
+            "time": g.get("time"),
+        }
+
+    def fetch_games_by_season(self, seasons: List[int], per_page: int = 100) -> pd.DataFrame:
+        all_rows: List[Dict[str, Any]] = []
+
+        for season in seasons:
+            cursor = None
+            page = 1
+
+            while True:
+                params = {"seasons[]": season, "per_page": per_page}
+                if cursor is not None:
+                    params["cursor"] = cursor
+                else:
+                    params["page"] = page
+
+                data = self._get("/v1/games", params=params)
+                games = data.get("data", []) or []
+                if not games:
+                    break
+
+                for g in games:
+                    all_rows.append(self._normalize_game_row(g))
+
+                meta = data.get("meta", {}) or {}
+                next_cursor = meta.get("next_cursor", None)
+
+                if next_cursor is not None:
+                    if next_cursor == cursor:
+                        break
+                    cursor = next_cursor
+                    continue
+
+                total_pages = meta.get("total_pages", page)
+                if page >= total_pages:
+                    break
+                page += 1
+
+        if not all_rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(all_rows)
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        return df
+
+    def fetch_games_by_date(self, d, per_page: int = 100) -> List[Dict[str, Any]]:
+        if isinstance(d, (datetime, date)):
+            d_str = d.strftime("%Y-%m-%d")
+        else:
+            d_str = str(d)
+
+        rows: List[Dict[str, Any]] = []
+        cursor = None
+        page = 1
+
+        while True:
+            params = {"dates[]": d_str, "per_page": per_page}
+            if cursor is not None:
+                params["cursor"] = cursor
+            else:
+                params["page"] = page
+
+            data = self._get("/v1/games", params=params)
+            games = data.get("data", []) or []
+            if not games:
+                break
+
+            for g in games:
+                rows.append(self._normalize_game_row(g))
+
+            meta = data.get("meta", {}) or {}
+            next_cursor = meta.get("next_cursor", None)
+
+            if next_cursor is not None:
+                if next_cursor == cursor:
+                    break
+                cursor = next_cursor
+                continue
+
+            total_pages = meta.get("total_pages", page)
+            if page >= total_pages:
+                break
+            page += 1
+
+        return rows
+
+    def fetch_games_by_date_df(
+        self,
+        d: Union[str, date, datetime],
+        per_page: int = 100,
+    ) -> pd.DataFrame:
+        rows = self.fetch_games_by_date(d=d, per_page=per_page)
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        return df
+
+        
