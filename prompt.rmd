@@ -1,0 +1,30 @@
+
+nba_bot 의 엔진을 기반으로 nhl_bot 을 만들어 볼거야. 
+
+nba_bot 에는 다음과 같은 파일들이 있어. 
+
+- nba_bot.yml
+- config.py
+- email_management.py
+- nba_advanced_stats.py
+- nba_api_client.py
+- nba_data.py
+- nba_edge.py
+- nba_feature_engineering.py
+- nba_features.py
+- nba_injury_lineup.py
+- nba_margin_model.py
+- nba_performance.py
+- nba_quant_bot.py
+- nba_quant_main_next_day.py
+- nba_quant_main.py
+- nba_quant_model.py
+- nba_strategy_tuning.py
+- nba_team_abbr.py
+- nba_train_quant.py
+- odds_client.py
+
+이 파일들을 먼저 nhl_bot 기준으로 하나하나 옮기고, 그다음으로 하나하나 봐 가면서 튜닝할거야. 
+내가 하나하나 파일을 주면, 너는 그걸 읽고, 일단 nhl_bot 기준으로 옮겨주면 되. 
+그리고 나서 나는 버그들과, 에러들과, 모델강화와, 훈련, 튜닝 등 차근차근 들어가 보자. 어때? 
+
