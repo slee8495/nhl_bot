@@ -1,72 +1,80 @@
+# nba_quant_bot.py
 
-1.	nhl_quant_bot.py (오케스트레이터/조립)
-
-	•	fetch (NHL games today + odds)
-	•	feature build (today_df)
-	•	predict (win + goal_diff)
-	•	edge 계산 + bet filter
-	•	이메일 리포트 (픽/요약)
-
-	2.	nhl_quant_main.py
-
-	•	NHLQuantBot().run(today) 같은 엔트리포인트
-	•	GitHub Actions에서 이 파일만 실행하면 끝
-
-	3.	nhl_performance.py
-
-	•	bet log 저장/정산/ROI/월별/누적
-	•	strategy tuning이 읽을 nhl_bet_log.csv 포맷을 여기서 고정
-
-	4.	nhl_quant_main_next_day.py
-
-	•	“어제 픽 정산” + “오늘 픽 생성” 같이 묶고 싶으면 여기서
-	•	(혹은 performance를 separate cron으로 돌려도 됨)
-
-	5.	nhl_advanced_stats.py
-
-	•	지금 피처 엔지니어링이 비교적 단순(롤링+Elo+rest)이라면,
-	•	나중에 xG, shot attempt, special teams 같은 고급 스탯 소스 붙일 때 여기서 확장
-
-	6.	nhl_injury_lineup.py
-
-	•	NHL은 라인/골리(Goalie)가 핵심이라 “선발 골리” 붙이는 순간 파워가 커짐
-	•	다만 데이터 소스/매칭이 귀찮아서 파이프라인 완성 후에 붙이는 게 맞음
-
---
+import numpy as np
+import pandas as pd
 
 
-- nba_bot.yml (nhl_bot.yml)
-- config.py (config.py)
-- email_management.py (email_management.py)
-- nba_advanced_stats.py ()
-- nba_api_client.py (nhl_api_client.py)
-- nba_data.py (nhl_data.py)
-- nba_edge.py (nhl_edge.py)
-- nba_feature_engineering.py (nhl_feature_engineering.py)
-- nba_features.py (nhl_features.py)
-- nba_injury_lineup.py ()
-- nba_margin_model.py (nhl_goal_diff_model.py)
-- nba_performance.py ()
-- nba_quant_bot.py ()
-- nba_quant_main_next_day.py ()
-- nba_quant_main.py ()
-- nba_quant_model.py (nhl_quant_model.py)
-- nba_strategy_tuning.py (nhl_strategy_tuning.py)
-- nba_team_abbr.py (nhl_team_abbr.py)
-- nba_train_quant.py (nhl_train_quant.py)
-- odds_client.py (odds_client.py)
+def american_to_prob(odds: float) -> float:
+    """
+    미국식 오즈 → 암묵 승률
+      -150 → 60.0%
+      +120 → 45.45%
+    """
+    o = float(odds)
+    if o == 0:
+        return np.nan
+    if o > 0:
+        return 100.0 / (o + 100.0)
+    else:
+        return -o / (-o + 100.0)
+
+
+def add_edge_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    입력 df 형식 (predict_win_proba() 후):
+
+      - p_home_win       (모델 예측)
+      - side             'home' 또는 'away'
+      - american_odds    (또는 decimal_odds 컬럼을 써도 됨 – 여기선 미국식 가정)
+
+    로직:
+      - side == 'home': model_p = p_home_win
+      - side == 'away': model_p = 1 - p_home_win
+
+      - implied_p = american_odds → 확률 변환
+      - edge = model_p - implied_p
+
+    """
+    df = df.copy()
+
+    if "side" not in df.columns:
+        raise ValueError("nba_today must contain 'side' column (home/away).")
+    if "american_odds" not in df.columns:
+        raise ValueError("nba_today must contain 'american_odds' column.")
+
+    # 모델 기준 확률
+    model_p = []
+    for _, row in df.iterrows():
+        side = str(row["side"]).lower()
+        p_home = float(row["p_home_win"])
+        if side == "home":
+            model_p.append(p_home)
+        elif side == "away":
+            model_p.append(1.0 - p_home)
+        else:
+            model_p.append(np.nan)
+
+    df["model_p"] = model_p
+
+    # 암묵 승률
+    df["implied_p"] = df["american_odds"].astype(float).map(american_to_prob)
+
+    # edge
+    df["edge"] = df["model_p"] - df["implied_p"]
+
+    # 정렬: edge 큰 순서
+    df.sort_values("edge", ascending=False, inplace=True)
+    return df
+
+
+def filter_bets(df: pd.DataFrame, min_edge: float = 0.03) -> pd.DataFrame:
+    """
+    edge >= min_edge (예: 3%) 만 추천.
+    """
+    return df[df["edge"] >= min_edge].copy()
+
 
 
 ===
 
-자 이제여기까지 온 상태야. 
-다음은 뭘까? 
-
-- nba_advanced_stats.py ()
-- nba_injury_lineup.py ()
-- nba_performance.py ()
-- nba_quant_bot.py ()
-- nba_quant_main_next_day.py ()
-- nba_quant_main.py ()
-
-이렇게 비어있지 아직. 
+자 이거 nba 버전 참고해서 만들어봐. 
