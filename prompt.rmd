@@ -1,387 +1,285 @@
-# nhl_performance.py
 
+그거 우리 이미 한거 아니었어? 
+
+====
+
+
+
+# nhl_quant_bot.py
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date as _date
-import os
+from typing import Optional, Dict, Any, List
 
 import numpy as np
 import pandas as pd
 
-from config import DATA_DIR
+from nhl_api_client import NHLDataClient
+from odds_client import OddsAPIClient
 
-BET_LOG_PATH = os.path.join(DATA_DIR, "nhl_bet_log.csv")
+from nhl_feature_engineering import build_training_dataset, build_today_dataset
+from nhl_quant_model import NHLQuantModel
+from nhl_goal_diff_model import NHLGoalDiffModel
+
+from nhl_edge import add_edge_from_odds, filter_bets
+from email_management import send_daily_eval_report
 
 
-def _american_payout(stake: float, odds: float) -> float:
+# -------------------------
+# Helpers
+# -------------------------
+def _safe_date(x) -> _date:
+    if isinstance(x, _date):
+        return x
+    return pd.to_datetime(x).date()
+
+
+def _get_training_seasons(n_seasons: int = 3) -> list[int]:
     """
-    미국식 오즈 기준, 승리했을 때 '순이익' (profit) 계산.
-      - odds = +150, stake = 100 → profit = 150
-      - odds = -200, stake = 100 → profit = 50
+    NHL도 NBA와 동일한 "시즌 시작=10월" convention으로 처리.
+    예)
+      - 2026-01 (시즌 진행중): current=2025, last_completed=2024
     """
-    if odds > 0:
-        return stake * (odds / 100.0)
-    return stake * (100.0 / abs(odds))
+    today = _date.today()
+    current_season = today.year if today.month >= 10 else today.year - 1
+    last_completed = current_season - 1
+    start = last_completed - (n_seasons - 1)
+    return list(range(start, last_completed + 1))
 
 
-def update_bet_log_and_summary(
-    reco_df: pd.DataFrame,
-    raw_games_past: pd.DataFrame,
-    today: _date,
-    stake_per_bet: float = 100.0,
-):
+@dataclass
+class NHLRunResult:
+    today: _date
+    n_games_today: int
+    n_odds_rows: int
+    n_scored_rows: int
+    n_edge_rows: int
+    n_bets: int
+
+
+class NHLQuantBot:
     """
-    - reco_df: 오늘(슬레이트) 추천 bet (edge 필터 통과) - game × side × bookmaker
-    - raw_games_past: today 이전까지 완료된 모든 경기 (score 포함)
-    - today: PT 기준 슬레이트 날짜 (main에서 넘겨줌)
-
-    동작:
-      1) 기존 bet log (nhl_bet_log.csv) 로드
-      2) reco_df를 append (result/pnl은 아직 없음)
-      3) log 중 result가 비어 있고 date < today 인 것들에 대해
-         raw_games_past 를 이용해 승/패 판정 및 PnL 계산
-      4) 요약 지표(summary) dict 반환
-      5) 갱신된 log CSV 저장
+    End-to-end orchestrator (NHL):
+      1) Fetch raw games (train seasons)
+      2) Build training dataset
+      3) Train/load models (win + goal_diff)
+      4) Fetch today's games
+      5) Build today features
+      6) Predict
+      7) Merge with odds -> edge -> filter bets
+      8) Email report
     """
-    # 1) 기존 로그 로드
-    if os.path.exists(BET_LOG_PATH):
-        log = pd.read_csv(BET_LOG_PATH)
-    else:
-        log = pd.DataFrame()
-
-    # 2) 오늘 추천 bet 추가
-    if reco_df is not None and not reco_df.empty:
-        new = reco_df.copy()
-
-        base_cols = [
-            "date",
-            "game_id",
-            "home_team",
-            "away_team",
-            "side",
-            "team",
-            "bookmaker",
-            "american_odds",
-            "model_p",
-            "implied_p",
-            "edge",
-        ]
-
-        # 빠진 컬럼 있으면 채워 넣기
-        for c in base_cols:
-            if c not in new.columns:
-                new[c] = np.nan
-
-        new = new[base_cols].copy()
-        new["stake"] = float(stake_per_bet)
-        new["result"] = np.nan   # 'win' / 'loss'
-        new["pnl"] = np.nan      # 달러 기준 손익
-
-        log = pd.concat([log, new], ignore_index=True)
-
-    if log.empty:
-        summary = {
-            "total_bets": 0,
-            "wins": 0,
-            "losses": 0,
-            "win_rate": None,
-            "total_pnl": 0.0,
-            "total_staked": 0.0,
-            "roi": None,
-            "avg_edge": None,
-            "start_date": None,
-        }
-        return log, summary
-
-    # 타입 정리
-    log["date"] = pd.to_datetime(log["date"], errors="coerce").dt.date
-
-    raw = raw_games_past.copy()
-    if "date" in raw.columns:
-        raw["date"] = pd.to_datetime(raw["date"], errors="coerce").dt.date
-
-    # raw에 필요한 컬럼 체크
-    need_cols = {"game_id", "home_score", "away_score", "home_team", "away_team"}
-    missing = [c for c in need_cols if c not in raw.columns]
-    if missing:
-        raise ValueError(f"[NHL PERFORMANCE] raw_games_past missing columns: {missing}")
-
-    # 3) 아직 result가 없고, 날짜가 today 이전인 bet들 settle
-    mask_open = log["result"].isna() & (log["date"] < today)
-
-    for idx in log[mask_open].index:
-        row = log.loc[idx]
-        gid = row.get("game_id")
-
-        # (A) game_id로 매칭
-        game = pd.DataFrame()
-        try:
-            gid_int = int(pd.to_numeric(gid, errors="coerce"))
-            game = raw[pd.to_numeric(raw["game_id"], errors="coerce") == gid_int]
-        except Exception:
-            game = raw[raw["game_id"] == gid]
-
-        # (B) backup: date + home + away
-        if game.empty:
-            if ("date" in raw.columns) and pd.notna(row.get("date")):
-                game = raw[
-                    (raw["date"] == row["date"])
-                    & (raw["home_team"] == row.get("home_team"))
-                    & (raw["away_team"] == row.get("away_team"))
-                ]
-
-        if game.empty:
-            # 아직 raw 데이터가 덜 들어왔거나 매칭 실패 → 다음 실행 때 재시도
-            continue
-
-        g = game.iloc[0]
-
-        side = str(row.get("side", "")).lower().strip()
-        if side == "home":
-            won = float(g["home_score"]) > float(g["away_score"])
-        elif side == "away":
-            won = float(g["away_score"]) > float(g["home_score"])
-        else:
-            continue
-
-        try:
-            odds = float(row["american_odds"])
-        except Exception:
-            continue
-
-        stake = float(row.get("stake", stake_per_bet))
-        profit_if_win = _american_payout(stake, odds)
-        pnl = profit_if_win if won else -stake
-
-        log.loc[idx, "result"] = "win" if won else "loss"
-        log.loc[idx, "pnl"] = pnl
-
-    # 4) 누적 PnL / summary 계산
-    log["stake"] = pd.to_numeric(log["stake"], errors="coerce")
-    log["pnl"] = pd.to_numeric(log["pnl"], errors="coerce")
-
-    # 누적 PnL (NaN은 0으로 간주해서 누적)
-    log["cum_pnl"] = log["pnl"].fillna(0).cumsum()
-
-    settled = log[log["result"].isin(["win", "loss"])].copy()
-    total_bets = len(settled)
-    wins = int((settled["result"] == "win").sum())
-    losses = int((settled["result"] == "loss").sum())
-
-    total_staked = float(settled["stake"].sum()) if total_bets > 0 else 0.0
-    total_pnl = float(settled["pnl"].sum()) if total_bets > 0 else 0.0
-    win_rate = (wins / total_bets) if total_bets > 0 else None
-    roi = (total_pnl / total_staked) if total_staked > 0 else None
-    avg_edge = float(settled["edge"].mean()) if total_bets > 0 else None
-
-    start_date = log["date"].min()
-    start_date_str = start_date.isoformat() if pd.notnull(start_date) else None
-
-    summary = {
-        "total_bets": int(total_bets),
-        "wins": wins,
-        "losses": losses,
-        "win_rate": win_rate,
-        "total_pnl": total_pnl,
-        "total_staked": total_staked,
-        "roi": roi,
-        "avg_edge": avg_edge,
-        "start_date": start_date_str,
-    }
-
-    # 5) 로그 저장
-    os.makedirs(DATA_DIR, exist_ok=True)
-    log.to_csv(BET_LOG_PATH, index=False)
-
-    return log, summary
-
---
-
-
-
-# nba_performance.py
-
-from __future__ import annotations
-from datetime import date as _date
-import os
-
-import numpy as np
-import pandas as pd
-
-from config import DATA_DIR
-
-BET_LOG_PATH = os.path.join(DATA_DIR, "nba_bet_log.csv")
-
-
-def _american_payout(stake: float, odds: float) -> float:
-    """
-    미국식 오즈 기준, 승리했을 때 '순이익' (profit) 계산.
-      - 예: odds = +150, stake = 100 → profit = 150
-      - 예: odds = -200, stake = 100 → profit = 50
-    """
-    if odds > 0:
-        return stake * (odds / 100.0)
-    else:
-        return stake * (100.0 / abs(odds))
-
-
-def update_bet_log_and_summary(
-    reco_df: pd.DataFrame,
-    raw_games_past: pd.DataFrame,
-    today: _date,
-    stake_per_bet: float = 100.0,
-):
-    """
-    - reco_df: 오늘 추천 bet (edge 필터 통과한 것들) - game × side × bookmaker
-    - raw_games_past: 오늘 이전까지 완료된 모든 경기 (score 포함)
-    - today: 오늘 날짜
-
-    동작:
-      1) 기존 bet log (nba_bet_log.csv) 로드
-      2) 오늘 추천 bet 을 log 에 append (result/pnl 은 아직 없음)
-      3) log 중 result 가 비어 있고 date < today 인 것들에 대해
-         raw_games_past 를 이용해 승/패 판정 및 PnL 계산
-      4) 요약 지표(summary) 계산 후 (dict 로) 반환
-      5) 갱신된 log 를 csv 로 저장
-    """
-    # 1) 기존 로그 로드
-    if os.path.exists(BET_LOG_PATH):
-        log = pd.read_csv(BET_LOG_PATH)
-    else:
-        log = pd.DataFrame()
-
-    # 2) 오늘 추천 bet 추가
-    if reco_df is not None and not reco_df.empty:
-        new = reco_df.copy()
-
-        base_cols = [
-            "date",
-            "game_id",
-            "home_team",
-            "away_team",
-            "side",
-            "team",
-            "bookmaker",
-            "american_odds",
-            "model_p",
-            "implied_p",
-            "edge",
-        ]
-        # 빠진 컬럼 있으면 채워 넣기
-        for c in base_cols:
-            if c not in new.columns:
-                new[c] = np.nan
-
-        new = new[base_cols].copy()
-        new["stake"] = float(stake_per_bet)
-        new["result"] = np.nan    # 'win' / 'loss'
-        new["pnl"] = np.nan       # 달러 기준 손익
-
-        log = pd.concat([log, new], ignore_index=True)
-
-    if log.empty:
-        # 아직 아무 bet 도 없으면 summary 도 비어있음
-        summary = {
-            "total_bets": 0,
-            "wins": 0,
-            "losses": 0,
-            "win_rate": None,
-            "total_pnl": 0.0,
-            "total_staked": 0.0,
-            "roi": None,
-            "avg_edge": None,
-            "start_date": None,
-        }
-        return log, summary
-
-    # 타입 정리
-    log["date"] = pd.to_datetime(log["date"]).dt.date
-    raw = raw_games_past.copy()
-    raw["date"] = pd.to_datetime(raw["date"]).dt.date
-
-    # 3) 아직 result 가 없고, 날짜가 오늘 이전인 bet 들 settle
-    mask_open = log["result"].isna() & (log["date"] < today)
-
-    for idx in log[mask_open].index:
-        row = log.loc[idx]
-        gid = row.get("game_id")
-
-        # game_id 로 먼저 매칭
-        game = raw[raw["game_id"] == gid]
-        if game.empty:
-            # 혹시 game_id 가 안맞으면 date + home + away 조합으로 백업 매칭
-            game = raw[
-                (raw["date"] == row["date"])
-                & (raw["home_team"] == row["home_team"])
-                & (raw["away_team"] == row["away_team"])
-            ]
-
-        if game.empty:
-            # 아직 데이터가 안 들어왔거나, 매칭 실패한 경우 → 다음 실행 때 다시 시도
-            continue
-
-        g = game.iloc[0]
-        side = str(row["side"]).lower()
-
-        if side == "home":
-            won = g["home_score"] > g["away_score"]
-        elif side == "away":
-            won = g["away_score"] > g["home_score"]
-        else:
-            # 잘못된 side 값
-            continue
-
-        try:
-            odds = float(row["american_odds"])
-        except Exception:
-            continue
-
-        stake = float(row.get("stake", stake_per_bet))
-        profit_if_win = _american_payout(stake, odds)
-        pnl = profit_if_win if won else -stake
-
-        log.loc[idx, "result"] = "win" if won else "loss"
-        log.loc[idx, "pnl"] = pnl
-
-    # 4) 누적 PnL / summary 계산
-    log["stake"] = pd.to_numeric(log["stake"], errors="coerce")
-    log["pnl"] = pd.to_numeric(log["pnl"], errors="coerce")
-
-    # 누적 PnL (NaN 은 0으로 간주해서 누적)
-    log["cum_pnl"] = log["pnl"].fillna(0).cumsum()
-
-    settled = log[log["result"].isin(["win", "loss"])].copy()
-    total_bets = len(settled)
-    wins = int((settled["result"] == "win").sum())
-    losses = int((settled["result"] == "loss").sum())
-    total_staked = float(settled["stake"].sum()) if total_bets > 0 else 0.0
-    total_pnl = float(settled["pnl"].sum()) if total_bets > 0 else 0.0
-    win_rate = (wins / total_bets) if total_bets > 0 else None
-    roi = (total_pnl / total_staked) if total_staked > 0 else None
-    avg_edge = float(settled["edge"].mean()) if total_bets > 0 else None
-
-    start_date = log["date"].min()
-    start_date_str = start_date.isoformat() if pd.notnull(start_date) else None
-
-    summary = {
-        "total_bets": int(total_bets),
-        "wins": wins,
-        "losses": losses,
-        "win_rate": win_rate,
-        "total_pnl": total_pnl,
-        "total_staked": total_staked,
-        "roi": roi,
-        "avg_edge": avg_edge,
-        "start_date": start_date_str,
-    }
-
-    # 5) 로그 저장
-    os.makedirs(DATA_DIR, exist_ok=True)
-    log.to_csv(BET_LOG_PATH, index=False)
-
-    return log, summary
-
-
-=====
-
-자 이번엔 이거 보고 해줘. 
+
+    def __init__(
+        self,
+        n_train_seasons: int = 3,
+        prefer_load_models: bool = True,
+        regions: str = "us",
+        preferred_bookmaker: Optional[str] = None,
+        market_blend_alpha: float = 0.7,
+        min_edge: float = 0.03,
+    ):
+        self.n_train_seasons = int(n_train_seasons)
+        self.prefer_load_models = bool(prefer_load_models)
+        self.regions = regions
+        self.preferred_bookmaker = preferred_bookmaker
+        self.market_blend_alpha = float(market_blend_alpha)
+        self.min_edge = float(min_edge)
+
+        self.api = NHLDataClient()
+        self.odds = OddsAPIClient()
+
+    # -------------------------
+    # Core steps
+    # -------------------------
+    def _load_or_train_models(
+        self,
+        train_df: pd.DataFrame,
+        feature_cols: List[str],
+    ) -> tuple[NHLQuantModel, NHLGoalDiffModel]:
+        # 1) win model
+        win_model = None
+        if self.prefer_load_models:
+            try:
+                win_model = NHLQuantModel.load_from_disk()
+            except Exception:
+                win_model = None
+
+        if win_model is None:
+            win_model = NHLQuantModel()
+            win_model.train_walkforward(
+                train_df,
+                feature_cols,
+                n_splits=5,
+                save=True,
+                eval_mode="holdout",
+                holdout_frac=0.20,
+                min_holdout_rows=200,
+            )
+
+        # 2) goal diff model
+        gd_model = None
+        if self.prefer_load_models:
+            try:
+                gd_model = NHLGoalDiffModel.load_from_disk()
+            except Exception:
+                gd_model = None
+
+        if gd_model is None:
+            gd_model = NHLGoalDiffModel()
+            gd_model.train_walkforward(
+                train_df,
+                feature_cols,
+                n_splits=5,
+                save=True,
+            )
+
+        return win_model, gd_model
+
+    def _fetch_training_raw_games(self) -> pd.DataFrame:
+        seasons = _get_training_seasons(self.n_train_seasons)
+        print(f"[NHL BOT] Fetching games for seasons: {seasons}")
+        raw_games = self.api.fetch_games_by_season(seasons)
+        if raw_games is None or raw_games.empty:
+            raise RuntimeError("[NHL BOT] No games fetched for training.")
+        return raw_games
+
+    def _fetch_today_games(self, today: _date) -> pd.DataFrame:
+        tg = self.api.fetch_games_by_date_df(today)
+        if tg is None or tg.empty:
+            print("[NHL BOT] No NHL games today.")
+            return pd.DataFrame()
+        return tg
+
+    # -------------------------
+    # Public run
+    # -------------------------
+    def run(self, today: Optional[_date] = None, send_email: bool = True) -> NHLRunResult:
+        today = today or _date.today()
+        today = _safe_date(today)
+        print(f"[NHL BOT] Run date = {today}")
+
+        # -------------------------
+        # 1) Training raw games
+        # -------------------------
+        raw_games = self._fetch_training_raw_games()
+        print(f"[NHL BOT] Training raw games rows = {len(raw_games)}")
+
+        # -------------------------
+        # 2) Build training dataset
+        # -------------------------
+        train_df, feature_cols = build_training_dataset(raw_games)
+        if train_df is None or train_df.empty:
+            raise RuntimeError("[NHL BOT] build_training_dataset returned empty.")
+        print(f"[NHL BOT] train rows={len(train_df)} features={len(feature_cols)}")
+
+        # -------------------------
+        # 3) Load or train models
+        # -------------------------
+        win_model, gd_model = self._load_or_train_models(train_df, feature_cols)
+
+        # -------------------------
+        # 4) Fetch today games
+        # -------------------------
+        today_games = self._fetch_today_games(today)
+        n_games_today = 0 if today_games.empty else int(today_games["game_id"].nunique())
+        print(f"[NHL BOT] today games={n_games_today}")
+
+        if today_games.empty:
+            # 이메일은 "오늘 경기 없음"만 보내는 것도 가능
+            if send_email:
+                try:
+                    send_daily_eval_report(
+                        sports="NHL",
+                        date=str(today),
+                        bets_df=pd.DataFrame(),
+                        all_edges_df=pd.DataFrame(),
+                        extra_text="No NHL games found for today.",
+                    )
+                except TypeError:
+                    # 기존 email_management 시그니처가 다를 수 있어 방어
+                    send_daily_eval_report(pd.DataFrame(), pd.DataFrame())
+            return NHLRunResult(
+                today=today,
+                n_games_today=0,
+                n_odds_rows=0,
+                n_scored_rows=0,
+                n_edge_rows=0,
+                n_bets=0,
+            )
+
+        # -------------------------
+        # 5) Build today dataset (features)
+        # -------------------------
+        today_df, _ = build_today_dataset(raw_games=raw_games, today_games=today_games, today=today)
+        if today_df is None or today_df.empty:
+            raise RuntimeError("[NHL BOT] build_today_dataset returned empty.")
+        print(f"[NHL BOT] today feature rows={len(today_df)}")
+
+        # -------------------------
+        # 6) Predict (win + goal_diff)
+        # -------------------------
+        scored = win_model.predict_proba(today_df)
+        scored = gd_model.predict_goal_diff(scored)
+
+        # unify columns expected by nhl_edge
+        # - nhl_edge.add_edge_from_odds expects p_home_win column (and optionally p_home_win_from_margin)
+        if "p_home_win" not in scored.columns and "p_home_win_adj" in scored.columns:
+            scored["p_home_win"] = scored["p_home_win_adj"]
+
+        # prefer margin-derived probability name that nhl_edge uses
+        if "p_home_win_from_goal_diff" in scored.columns and "p_home_win_from_margin" not in scored.columns:
+            scored["p_home_win_from_margin"] = scored["p_home_win_from_goal_diff"]
+
+        # -------------------------
+        # 7) Odds + edge + filter
+        # -------------------------
+        odds_df = self.odds.fetch_nhl_moneyline_odds(regions=self.regions, attach_game_id=True)
+        n_odds_rows = 0 if odds_df is None else len(odds_df)
+        print(f"[NHL BOT] odds rows={n_odds_rows}")
+
+        edges = add_edge_from_odds(
+            scored_games=scored,
+            odds_df=odds_df,
+            preferred_bookmaker=self.preferred_bookmaker,
+            market_blend_alpha=self.market_blend_alpha,
+            odds_history_df=None,  # 나중에 snapshot 저장 붙이면 넣자
+        )
+        n_edge_rows = 0 if edges is None or edges.empty else len(edges)
+        print(f"[NHL BOT] edge rows={n_edge_rows}")
+
+        bets = filter_bets(edges, min_edge=self.min_edge, use_strategy_config=True)
+        n_bets = 0 if bets is None or bets.empty else len(bets)
+        print(f"[NHL BOT] bets rows={n_bets}")
+
+        # -------------------------
+        # 8) Email
+        # -------------------------
+        if send_email:
+            try:
+                # 추천: email_management.py가 sports/date/df를 받도록 설계했을 가능성
+                send_daily_eval_report(
+                    sports="NHL",
+                    date=str(today),
+                    bets_df=bets,
+                    all_edges_df=edges,
+                    extra_text=None,
+                )
+            except TypeError:
+                # 기존 시그니처 방어: (bets_df, edges_df)만 받는 형태면 여기로
+                send_daily_eval_report(bets, edges)
+
+        return NHLRunResult(
+            today=today,
+            n_games_today=n_games_today,
+            n_odds_rows=n_odds_rows,
+            n_scored_rows=len(scored),
+            n_edge_rows=n_edge_rows,
+            n_bets=n_bets,
+        )
+
+
+
+
+    
