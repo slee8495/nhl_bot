@@ -25,7 +25,7 @@ nba_bot 보다 1/10 으로 작게 들어가는게 목표인 봇. 왜냐면, 시�
 - nba_quant_main_next_day.py ()
 - nba_quant_main.py ()
 - nba_quant_model.py (nhl_quant_model.py)
-- nba_strategy_tuning.py ()
+- nba_strategy_tuning.py (nhl_strategy_tuning.py)
 - nba_team_abbr.py (nhl_team_abbr.py)
 - nba_train_quant.py (nhl_train_quant.py)
 - odds_client.py (odds_client.py)
