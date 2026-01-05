@@ -18,7 +18,7 @@ nba_bot 보다 1/10 으로 작게 들어가는게 목표인 봇. 왜냐면, 시�
 - nba_edge.py (nhl_edge.py)
 - nba_feature_engineering.py (nhl_feature_engineering.py)
 - nba_features.py (nhl_features.py)
-- nba_injury_lineup.py ()
+- nba_injury_lineup.py (nhl_injury_lineup.py)
 - nba_margin_model.py (nhl_goal_diff_model.py)
 - nba_performance.py (nhl_performance.py)
 - nba_quant_bot.py (nhl_quant_bot.py)
@@ -32,6 +32,4 @@ nba_bot 보다 1/10 으로 작게 들어가는게 목표인 봇. 왜냐면, 시�
 
 
 
-- nba_advanced_stats.py ()
-- nba_injury_lineup.py ()
-
+- nba_advanced_stats.py ()  -> 이거 우리 다 balldontlie 에서 가져올 수 있는거 아니야? nhl 은 뭐가 달라? 
