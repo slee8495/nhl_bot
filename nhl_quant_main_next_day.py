@@ -19,6 +19,12 @@ from nhl_performance import update_bet_log_and_summary
 from nhl_strategy_tuning import tune_strategy_from_log
 from email_management import send_nhl_daily_report
 
+from nhl_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
+
+scored = attach_lineup_features(scored, today)
+scored = adjust_prob_with_lineup(scored)
+
+
 
 def _add_ensemble_prob(scored_games: pd.DataFrame) -> pd.DataFrame:
     df = scored_games.copy()
