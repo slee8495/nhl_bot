@@ -1,554 +1,161 @@
-from __future__ import annotations
 
-from typing import List, Dict, Any, Optional, Union
-from datetime import date, datetime
-import time
 
-import requests
+# nba_data.py
+
 import pandas as pd
+from typing import Tuple
+from config import NBA_TRAIN_PATH, NBA_TODAY_PATH
 
-from config import BALLDONTLIE_API_KEY, BALLDONTLIE_BASE_URL
 
-
-class NHLDataClient:
+def load_training_data() -> pd.DataFrame:
     """
-    balldontlie NHL API 래퍼
-      - 여러 시즌 게임 히스토리 가져오기
-      - 특정 날짜 게임 가져오기 (today_games 용)
+    nba_train.csv 형식 (예시):
+      - game_id
+      - date
+      - season
+      - home_team
+      - away_team
+      - feature_1, feature_2, ..., feature_k
+      - target   # 1 = home 팀 승리, 0 = 패배 (또는 네가 정의한 label)
 
-    NOTE:
-      - balldontlie 응답에서 away 팀 키가 "away_team" 또는 "visitor_team"일 수 있어서 둘 다 지원
-      - base_url/BALLDONTLIE_BASE_URL 세팅에 따라 path가 /v1/games 또는 /nhl/v1/games 형태일 수 있음
-        (1차 포팅은 /v1/games 유지)
+    여기서는:
+      - 'target' 컬럼만 필수
+      - feature 컬럼은 숫자형이면 뭐든 상관 없음
     """
-
-    def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
-        self.api_key = api_key or BALLDONTLIE_API_KEY
-        self.base_url = (base_url or BALLDONTLIE_BASE_URL).rstrip("/")
-        if not self.api_key:
-            raise ValueError("BALLDONTLIE_API_KEY is missing. Set it in your .env.")
-
-    def fetch_games_by_date_range_df(
-        self,
-        start_date: date,
-        end_date: date,
-        per_page: int = 100,
-    ) -> pd.DataFrame:
-        """
-        [start_date, end_date] 범위 게임을 전부 가져온다
-        """
-        start_str = start_date.strftime("%Y-%m-%d")
-        end_str = end_date.strftime("%Y-%m-%d")
-
-        rows = []
-        cursor = None
-        page = 1
-
-        while True:
-            params = {"start_date": start_str, "end_date": end_str, "per_page": per_page}
-            if cursor is not None:
-                params["cursor"] = cursor
-            else:
-                params["page"] = page
-
-            data = self._get("/v1/games", params=params)
-            games = data.get("data", []) or []
-            if not games:
-                break
-
-            for g in games:
-                rows.append(self._normalize_game_row(g))
-
-            meta = data.get("meta", {}) or {}
-            next_cursor = meta.get("next_cursor", None)
-
-            if next_cursor is not None:
-                if next_cursor == cursor:
-                    break
-                cursor = next_cursor
-                continue
-
-            total_pages = meta.get("total_pages", page)
-            if page >= total_pages:
-                break
-            page += 1
-
-        df = pd.DataFrame(rows)
-        if not df.empty and "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        return df
-
-    def _get(
-        self,
-        path: str,
-        params: Optional[Dict[str, Any]] = None,
-        max_retries: int = 3,
-    ) -> Dict[str, Any]:
-        """
-        공통 GET 래퍼
-        - v1 엔드포인트: Authorization 헤더에 Bearer 없이 API 키 그대로
-        """
-        url = f"{self.base_url}{path}"
-        headers: Dict[str, str] = {
-            "Authorization": self.api_key,
-            "Accept": "application/json",
-        }
-        params = params or {}
-
-        last_exc: Optional[Exception] = None
-
-        for i in range(max_retries):
-            try:
-                resp = requests.get(url, params=params, headers=headers, timeout=30)
-
-                if resp.status_code == 429:
-                    retry_after = resp.headers.get("Retry-After")
-                    if retry_after is not None:
-                        try:
-                            wait_sec = int(retry_after)
-                        except ValueError:
-                            wait_sec = 10
-                    else:
-                        wait_sec = 5 * (2 ** i)
-
-                    print(
-                        f"[NHL API] 429 Too Many Requests. "
-                        f"Sleep {wait_sec}s and retry ({i+1}/{max_retries})..."
-                    )
-                    time.sleep(wait_sec)
-                    continue
-
-                resp.raise_for_status()
-                return resp.json()
-
-            except Exception as e:
-                last_exc = e
-                if i < max_retries - 1:
-                    time.sleep(1.5 * (2 ** i))
-                else:
-                    break
-
-        if last_exc:
-            raise last_exc
-        raise RuntimeError("Unknown error in _get()")
-
-    @staticmethod
-    def _normalize_game_row(g: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        balldontlie game dict -> downstream에서 쓰기 좋은 표준 row로 변환
-
-        NHL/NBA 차이 방어:
-          - home_team: 동일
-          - away 팀: away_team 또는 visitor_team
-          - score 키도 리그별로 다를 수 있어 fallback 처리
-        """
-        home = g.get("home_team") or {}
-
-        # ✅ NHL 가능성: away_team
-        away = g.get("away_team") or g.get("visitor_team") or {}
-
-        # ✅ 점수 키도 방어 (NBA: home_team_score / visitor_team_score)
-        home_score = g.get("home_team_score", g.get("home_score"))
-        away_score = g.get("away_team_score", g.get("visitor_team_score", g.get("away_score")))
-
-        return {
-            "game_id": g.get("id"),
-            "date": g.get("date"),
-            "season": g.get("season"),
-
-            "home_team_id": home.get("id"),
-            "away_team_id": away.get("id"),
-            "home_team_abbr": home.get("abbreviation"),
-            "away_team_abbr": away.get("abbreviation"),
-
-            "home_team": home.get("full_name"),
-            "away_team": away.get("full_name"),
-
-            "home_score": home_score,
-            "away_score": away_score,
-
-            "status": g.get("status"),
-            "postseason": g.get("postseason"),
-            "period": g.get("period"),
-            "time": g.get("time"),
-        }
-
-    def fetch_games_by_season(self, seasons: List[int], per_page: int = 100) -> pd.DataFrame:
-        all_rows: List[Dict[str, Any]] = []
-
-        for season in seasons:
-            cursor = None
-            page = 1
-
-            while True:
-                params = {"seasons[]": season, "per_page": per_page}
-                if cursor is not None:
-                    params["cursor"] = cursor
-                else:
-                    params["page"] = page
-
-                data = self._get("/v1/games", params=params)
-                games = data.get("data", []) or []
-                if not games:
-                    break
-
-                for g in games:
-                    all_rows.append(self._normalize_game_row(g))
-
-                meta = data.get("meta", {}) or {}
-                next_cursor = meta.get("next_cursor", None)
-
-                if next_cursor is not None:
-                    if next_cursor == cursor:
-                        break
-                    cursor = next_cursor
-                    continue
-
-                total_pages = meta.get("total_pages", page)
-                if page >= total_pages:
-                    break
-                page += 1
-
-        if not all_rows:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(all_rows)
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        return df
-
-    def fetch_games_by_date(self, d, per_page: int = 100) -> List[Dict[str, Any]]:
-        if isinstance(d, (datetime, date)):
-            d_str = d.strftime("%Y-%m-%d")
-        else:
-            d_str = str(d)
-
-        rows: List[Dict[str, Any]] = []
-        cursor = None
-        page = 1
-
-        while True:
-            params = {"dates[]": d_str, "per_page": per_page}
-            if cursor is not None:
-                params["cursor"] = cursor
-            else:
-                params["page"] = page
-
-            data = self._get("/v1/games", params=params)
-            games = data.get("data", []) or []
-            if not games:
-                break
-
-            for g in games:
-                rows.append(self._normalize_game_row(g))
-
-            meta = data.get("meta", {}) or {}
-            next_cursor = meta.get("next_cursor", None)
-
-            if next_cursor is not None:
-                if next_cursor == cursor:
-                    break
-                cursor = next_cursor
-                continue
-
-            total_pages = meta.get("total_pages", page)
-            if page >= total_pages:
-                break
-            page += 1
-
-        return rows
-
-    def fetch_games_by_date_df(
-        self,
-        d: Union[str, date, datetime],
-        per_page: int = 100,
-    ) -> pd.DataFrame:
-        rows = self.fetch_games_by_date(d=d, per_page=per_page)
-        if not rows:
-            return pd.DataFrame()
-        df = pd.DataFrame(rows)
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        return df
-
----
+    df = pd.read_csv(NBA_TRAIN_PATH)
+    if "target" not in df.columns:
+        raise ValueError("nba_train.csv must contain a 'target' column.")
+    return df
 
 
-# nba_api_client.py
+def load_today_games() -> pd.DataFrame:
+    """
+    nba_today.csv 형식 (예시):
+
+      game_id           고유 ID (문자열/숫자 아무거나)
+      date
+      home_team
+      away_team
+
+      # model input feature 들 (학습 때와 동일 구조)
+      feature_1
+      feature_2
+      ...
+      feature_k
+
+      # betting odds (미국식 오즈 또는 십진 오즈 중 하나)
+      side              'home' 또는 'away' (어느 쪽에 대한 odds 인지)
+      american_odds     예: -150, +120 ...
+      # 또는 decimal_odds   (둘 중 하나 쓰면 됨)
+
+    최소 requirements:
+      - game_id
+      - side
+      - target에 대응되는쪽 feature 세트 (여기서는 'home 승리 확률' 모델이므로
+        feature는 'home 관점'으로 정리되어 있는 걸로 가정)
+    """
+    df = pd.read_csv(NBA_TODAY_PATH)
+    if "game_id" not in df.columns:
+        raise ValueError("nba_today.csv must contain 'game_id'.")
+    return df
+
+
+
+
+===============
+
+
+# nba_features.py
 
 from __future__ import annotations
+from typing import Tuple
 
-from typing import List, Dict, Any, Optional, Union
-from datetime import date, datetime
-import time
-
-import requests
+import numpy as np
 import pandas as pd
 
-from config import BALLDONTLIE_API_KEY, BALLDONTLIE_BASE_URL
 
-
-
-
-class NBADataClient:
+def build_training_df(raw_games: pd.DataFrame) -> pd.DataFrame:
     """
-    balldontlie NBA API 래퍼
-      - 여러 시즌 게임 히스토리 가져오기
-      - 특정 날짜 게임 가져오기 (today_games 용)
+    raw_games 예시 컬럼 구조 (너가 맞추면 됨):
+
+      - game_id
+      - date (datetime or string)
+      - season
+      - home_team, away_team
+      - home_score, away_score
+
+      - home_off_rt, away_off_rt, ...
+      - home_def_rt, away_def_rt, ...
+      - home_elo, away_elo, ...
+      - home_rest_days, away_rest_days
+      - etc...
+
+    여기서는:
+      - target: home 팀 승리 여부 (1 = home win, 0 = home loss)
+      - feature: 'home 관점'에서의 숫자형 피처들로 구성
+        (home_xxx - away_xxx, home_xxx, away_xxx 등 자유롭게 설계 가능)
     """
+    df = raw_games.copy()
 
-    def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
-        self.api_key = api_key or BALLDONTLIE_API_KEY
-        self.base_url = (base_url or BALLDONTLIE_BASE_URL).rstrip("/")
-        if not self.api_key:
-            raise ValueError("BALLDONTLIE_API_KEY is missing. Set it in your .env.")
-        
-    def fetch_games_by_date_range_df(
-        self,
-        start_date: date,
-        end_date: date,
-        per_page: int = 100,
-    ) -> pd.DataFrame:
-        """
-        [start_date, end_date] 범위 게임을 전부 가져온다 (API timezone 문제 회피용)
-        """
-        start_str = start_date.strftime("%Y-%m-%d")
-        end_str = end_date.strftime("%Y-%m-%d")
+    # 기본 target
+    if {"home_score", "away_score"}.issubset(df.columns):
+        df["target"] = (df["home_score"] > df["away_score"]).astype(int)
+    elif "target" in df.columns:
+        # 이미 target 이 있다면 그대로 사용
+        pass
+    else:
+        raise ValueError("raw_games must have either (home_score, away_score) or 'target'.")
 
-        rows = []
-        cursor = None
-        page = 1
+    # 날짜 타입 정리
+    if not np.issubdtype(df["date"].dtype, np.datetime64):
+        df["date"] = pd.to_datetime(df["date"])
 
-        while True:
-            params = {"start_date": start_str, "end_date": end_str, "per_page": per_page}
-            if cursor is not None:
-                params["cursor"] = cursor
-            else:
-                params["page"] = page
+    # ---- 예시 피처 설계 (필요 시 원하는 만큼 더 추가/수정) ----
+    # 숫자형 컬럼만 선별
+    num_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    drop_for_features = {
+        "game_id",
+        "season",
+        "home_score",
+        "away_score",
+        "target",
+    }
+    base_numeric = [c for c in num_cols if c not in drop_for_features]
 
-            data = self._get("/v1/games", params=params)
-            games = data.get("data", []) or []
-            if not games:
-                break
+    # 예: home/away 차이형 피처가 있다면 (home_off_rt - away_off_rt)처럼 만들 수 있음.
+    # 여기서는 간단히 base_numeric 전체를 사용 (이미 home관점으로 들어있다고 가정)
+    feature_cols = base_numeric
 
-            for g in games:
-                rows.append(self._normalize_game_row(g))
+    df_model = df[
+        ["game_id", "date", "season", "home_team", "away_team", "target"] + feature_cols
+    ].dropna(subset=feature_cols + ["target"])
 
-            meta = data.get("meta", {}) or {}
-            next_cursor = meta.get("next_cursor", None)
+    return df_model, feature_cols
 
-            if next_cursor is not None:
-                if next_cursor == cursor:
-                    break
-                cursor = next_cursor
-                continue
 
-            total_pages = meta.get("total_pages", page)
-            if page >= total_pages:
-                break
-            page += 1
+def build_today_feature_df(
+    today_games: pd.DataFrame,
+    feature_cols: list[str],
+) -> pd.DataFrame:
+    """
+    - 학습 때 사용한 feature_cols 기준으로,
+      오늘 경기 DataFrame을 모델 input 형태로 정리.
 
-        df = pd.DataFrame(rows)
-        if not df.empty and "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        return df
+    today_games 예시 컬럼:
+      - game_id, date, home_team, away_team
+      - 같은 스키마의 feature 컬럼들 (home관점)
+      - american_odds (또는 american_odds_home/away 분리)
 
-    def _get(
-        self,
-        path: str,
-        params: Optional[Dict[str, Any]] = None,
-        max_retries: int = 3,
-    ) -> Dict[str, Any]:
-        """
-        공통 GET 래퍼
-        - v1 엔드포인트: Authorization 헤더에 Bearer 없이 API 키 그대로
-        """
-        url = f"{self.base_url}{path}"
-        headers: Dict[str, str] = {
-            "Authorization": self.api_key,
-            "Accept": "application/json",
-        }
-        params = params or {}
+    여기서는 단일 'bets row' 기준으로:
+      - side == 'home'   → p_model = p_home_win
+      - side == 'away'   → p_model = 1 - p_home_win
+    """
+    df = today_games.copy()
+    missing = [c for c in feature_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"build_today_feature_df: missing features {missing} in today_games")
 
-        last_exc: Optional[Exception] = None
+    return df
 
-        for i in range(max_retries):
-            try:
-                resp = requests.get(url, params=params, headers=headers, timeout=30)
-
-                # 429 → 레이트 리밋: sleep 후 재시도
-                if resp.status_code == 429:
-                    retry_after = resp.headers.get("Retry-After")
-                    if retry_after is not None:
-                        try:
-                            wait_sec = int(retry_after)
-                        except ValueError:
-                            wait_sec = 10
-                    else:
-                        # 백오프: 5, 10, 20...
-                        wait_sec = 5 * (2 ** i)
-
-                    print(
-                        f"[NBA API] 429 Too Many Requests. "
-                        f"Sleep {wait_sec}s and retry ({i+1}/{max_retries})..."
-                    )
-                    time.sleep(wait_sec)
-                    continue
-
-                resp.raise_for_status()
-                return resp.json()
-
-            except Exception as e:
-                last_exc = e
-                # 간단 백오프
-                if i < max_retries - 1:
-                    time.sleep(1.5 * (2 ** i))
-                else:
-                    break
-
-        # retries exhausted
-        if last_exc:
-            raise last_exc
-        raise RuntimeError("Unknown error in _get()")
-
-    @staticmethod
-    def _normalize_game_row(g: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        balldontlie game dict -> downstream에서 쓰기 좋은 표준 row로 변환
-        - 팀명 문자열(full_name)만 쓰지 말고 abbr/id를 반드시 포함
-        """
-        home = g.get("home_team") or {}
-        visitor = g.get("visitor_team") or {}
-
-        return {
-            "game_id": g.get("id"),
-            "date": g.get("date"),
-            "season": g.get("season"),
-
-            # ✅ 표준키 (추천: 조인/필터는 이걸로)
-            "home_team_id": home.get("id"),
-            "away_team_id": visitor.get("id"),
-            "home_team_abbr": home.get("abbreviation"),
-            "away_team_abbr": visitor.get("abbreviation"),
-
-            # 표시용(있으면 편함)
-            "home_team": home.get("full_name"),
-            "away_team": visitor.get("full_name"),
-
-            "home_score": g.get("home_team_score"),
-            "away_score": g.get("visitor_team_score"),
-            "status": g.get("status"),
-            "postseason": g.get("postseason"),
-            "period": g.get("period"),
-            "time": g.get("time"),
-        }
 
     
-
-    def fetch_games_by_season(self, seasons: List[int], per_page: int = 100) -> pd.DataFrame:
-        all_rows: List[Dict[str, Any]] = []
-
-        for season in seasons:
-            cursor = None
-            page = 1
-
-            while True:
-                params = {"seasons[]": season, "per_page": per_page}
-                # cursor가 있으면 cursor 방식, 없으면 page 방식 fallback
-                if cursor is not None:
-                    params["cursor"] = cursor
-                else:
-                    params["page"] = page
-
-                data = self._get("/v1/games", params=params)
-                games = data.get("data", []) or []
-                if not games:
-                    break
-
-                for g in games:
-                    all_rows.append(self._normalize_game_row(g))
-
-                meta = data.get("meta", {}) or {}
-                next_cursor = meta.get("next_cursor", None)
-
-                # ✅ cursor pagination 지원되면 그걸로 계속
-                if next_cursor is not None:
-                    if next_cursor == cursor:
-                        break
-                    cursor = next_cursor
-                    continue
-
-                # ✅ cursor 없으면 기존 page 방식
-                total_pages = meta.get("total_pages", page)
-                if page >= total_pages:
-                    break
-                page += 1
-
-        if not all_rows:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(all_rows)
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        return df
-
-
-    def fetch_games_by_date(self, d, per_page: int = 100) -> List[Dict[str, Any]]:
-        if isinstance(d, (datetime, date)):
-            d_str = d.strftime("%Y-%m-%d")
-        else:
-            d_str = str(d)
-
-        rows: List[Dict[str, Any]] = []
-        cursor = None
-        page = 1
-
-        while True:
-            params = {"dates[]": d_str, "per_page": per_page}
-            if cursor is not None:
-                params["cursor"] = cursor
-            else:
-                params["page"] = page
-
-            data = self._get("/v1/games", params=params)
-            games = data.get("data", []) or []
-            if not games:
-                break
-
-            for g in games:
-                rows.append(self._normalize_game_row(g))
-
-            meta = data.get("meta", {}) or {}
-            next_cursor = meta.get("next_cursor", None)
-
-            if next_cursor is not None:
-                if next_cursor == cursor:
-                    break
-                cursor = next_cursor
-                continue
-
-            total_pages = meta.get("total_pages", page)
-            if page >= total_pages:
-                break
-            page += 1
-
-        return rows
-
-
-    def fetch_games_by_date_df(
-        self,
-        d: Union[str, date, datetime],
-        per_page: int = 100,
-    ) -> pd.DataFrame:
-        """
-        fetch_games_by_date()의 DataFrame 버전 (편의 함수)
-        """
-        rows = self.fetch_games_by_date(d=d, per_page=per_page)
-        if not rows:
-            return pd.DataFrame()
-        df = pd.DataFrame(rows)
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        return df
-
-
