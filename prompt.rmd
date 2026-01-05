@@ -1,4 +1,96 @@
 
 
-지금 한게 nhl version feature engineering 이었던거지? 
-다음은 무슨 파일 할까 그럼? 
+# nba_train_quant.py
+
+from __future__ import annotations
+
+from datetime import date
+
+from nba_api_client import NBADataClient
+from nba_feature_engineering import build_training_dataset
+from nba_quant_model import NBAQuantModel
+from nba_margin_model import NBAMarginModel
+
+
+def get_training_seasons(n_seasons: int = 3) -> list[int]:
+    """
+    최근 n_seasons개의 '완료된 시즌'만 학습에 사용.
+
+    예)
+    - 2025-12 (시즌 진행중): last_completed = 2024 → [2022, 2023, 2024] (n=3)
+    - 2025-02 (시즌 진행중): current_season = 2024, last_completed = 2023 → [2021, 2022, 2023]
+    """
+    today = date.today()
+
+    # 10월 이후면 그 해 시즌이 "진행중"
+    current_season = today.year if today.month >= 10 else today.year - 1
+    last_completed = current_season - 1
+
+    start = last_completed - (n_seasons - 1)
+    return list(range(start, last_completed + 1))
+
+
+
+def main():
+    seasons = get_training_seasons(n_seasons=2)
+    print(f"[NBA TRAIN] Fetching games for seasons: {seasons}")
+
+    client = NBADataClient()
+    raw_games = client.fetch_games_by_season(seasons)
+
+    if raw_games is None or len(raw_games) == 0:
+        print("[NBA TRAIN] No games fetched. Check API or seasons list.")
+        return
+
+    print(f"[NBA TRAIN] Raw games fetched: {len(raw_games)}")
+
+    train_df, feature_cols = build_training_dataset(raw_games)
+    print(f"[NBA TRAIN] Training rows: {len(train_df)}, features: {len(feature_cols)}")
+
+    if train_df is None or train_df.empty:
+        print("[NBA TRAIN] build_training_dataset returned empty. Abort.")
+        return
+
+    # =========================
+    # A) Win model (NO time-weight)
+    # =========================
+    win_model = NBAQuantModel()
+    win_eval = win_model.train_walkforward(
+        train_df,
+        feature_cols,
+        n_splits=5,
+        half_life_days=None,  # 의미 없지만 명시
+        save=True,
+    )
+
+    print(
+        f"[NBA TRAIN] Win model saved. n_games={win_eval.n_games}, "
+        f"mean_auc={win_eval.mean_auc:.4f}, mean_logloss={win_eval.mean_logloss:.4f}"
+    )
+
+    # =========================
+    # B) Margin model (NO time-weight)
+    # =========================
+    margin_model = NBAMarginModel()
+    margin_eval = margin_model.train_walkforward(
+        train_df,
+        feature_cols,
+        n_splits=5,
+        half_life_days=None,  # 의미 없지만 명시
+        save=True,
+    )
+
+    print(
+        f"[NBA TRAIN] Margin model saved. n_games={margin_eval.n_games}, "
+        f"mean_mae={margin_eval.mean_mae:.3f}, mean_rmse={margin_eval.mean_rmse:.3f}, "
+        f"residual_std={margin_eval.residual_std:.3f}"
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+
+====
+
+이게 내가 nba 에서 썼던 버전인데, 뭐 참고할 건 없어? 
