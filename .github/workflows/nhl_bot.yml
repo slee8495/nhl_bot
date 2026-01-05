@@ -5,11 +5,10 @@ on:
     # =========================
     # ✅ Daily run @ 9:00 PM PT (PST)
     # -------------------------
-    # 09:00 PT (PST, UTC-8) = 05:00 UTC (next day)
+    # 09:00 PT (PST, UTC-8) = 09:00 UTC
     - cron: "0 5 * * *"
     # =========================
-
-    # =========================
+    
     # ✅ Annual retrain (Aug 1)
     # -------------------------
     # Aug is typically PDT (UTC-7): 06:00 PT = 13:00 UTC
@@ -21,14 +20,41 @@ on:
     # Note: GitHub Actions cron is UTC
     # ------------------------------------------------------
     # ---- PST (UTC-8) : 09:00–20:00 PT => 17:00–04:00 UTC ----
+    # 9 AM  (PST) = 17:00 UTC
+    # - cron: "0 17 * * *"
+
+    # 10 AM (PST) = 18:00 UTC
+    # - cron: "0 18 * * *"
+
+    # 11 AM (PST) = 19:00 UTC
+    # - cron: "0 19 * * *"
+
+    # 12 PM (PST) = 20:00 UTC
+    # - cron: "0 20 * * *"
+
+    # 1 PM  (PST) = 21:00 UTC
+    # - cron: "0 21 * * *"
+
     # 2 PM  (PST) = 22:00 UTC
-    - cron: "0 22 * * *"
+    # - cron: "0 22 * * *"
 
     # 3 PM  (PST) = 23:00 UTC
-    - cron: "0 23 * * *"
+    # - cron: "0 23 * * *"
+
+    # 4 PM  (PST) = 00:00 UTC (next day)
+    # - cron: "0 0 * * *"
 
     # 5 PM  (PST) = 01:00 UTC (next day)
-    - cron: "0 1 * * *"
+    # - cron: "0 1 * * *"
+
+    # 6 PM  (PST) = 02:00 UTC (next day)
+    # - cron: "0 2 * * *"
+
+    # 7 PM  (PST) = 03:00 UTC (next day)
+    # - cron: "0 3 * * *"
+
+    # 8 PM  (PST) = 04:00 UTC (next day)
+    # - cron: "0 4 * * *"
     # ======================================================
 
   workflow_dispatch:
