@@ -1,3 +1,14 @@
+
+
+NHL_TRAIN_PATH = os.path.join(DATA_DIR, "nhl_train.csv")
+NHL_TODAY_PATH = os.path.join(DATA_DIR, "nhl_today.csv")
+NHL_MODEL_PATH = os.path.join(MODEL_DIR, "nhl_xgb_win.pkl")
+NHL_MARGIN_MODEL_PATH = os.path.join(MODEL_DIR, "nhl_xgb_margin.pkl")  # 있으면
+NHL_TOTAL_DAILY_RISK = 100
+
+---
+
+
 import pandas as pd
 from config import NHL_TRAIN_PATH, NHL_TODAY_PATH
 
