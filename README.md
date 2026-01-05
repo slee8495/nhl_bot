@@ -32,15 +32,11 @@ nba_bot 보다 1/10 으로 작게 들어가는게 목표인 봇. 왜냐면, 시�
 
 
 
-
-	1.	config.py
-	2.	nhl_bot.yml (스케줄/환경변수)
-	3.	email_management.py
-	4.	odds_client.py
-	5.	*_api_client.py
-	6.	*_data.py → *_features.py → *_feature_engineering.py
-	7.	*_edge.py
-	8.	*_quant_model.py / *_train_quant.py
-	9.	*_quant_main.py / *_quant_main_next_day.py
-
+1.	nhl_feature_engineering.py ✅ (지금)
+2.	nhl_train_quant.py (train + save model)
+3.	nhl_quant_model.py (load model + predict)
+4.	nhl_edge.py (odds merge + implied prob + edge)
+5.	email_management.py (NHL 리포트 함수 추가)
+6.	nhl_quant_main.py (daily run script)
+7.	nhl_bot.yml (GitHub Actions 스케줄)
 
