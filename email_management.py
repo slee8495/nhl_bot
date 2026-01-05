@@ -1,4 +1,4 @@
-# email_management.py (NHL Bot)
+# email_management.py
 
 import smtplib
 from email.mime.text import MIMEText
