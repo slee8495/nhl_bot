@@ -33,14 +33,6 @@ nba_bot 보다 1/10 으로 작게 들어가는게 목표인 봇. 왜냐면, 시�
 
 
 
-1.	nhl_quant_bot.py (오케스트레이터/조립)
-
-	•	fetch (NHL games today + odds)
-	•	feature build (today_df)
-	•	predict (win + goal_diff)
-	•	edge 계산 + bet filter
-	•	이메일 리포트 (픽/요약)
-
 	2.	nhl_quant_main.py
 
 	•	NHLQuantBot().run(today) 같은 엔트리포인트
@@ -66,4 +58,3 @@ nba_bot 보다 1/10 으로 작게 들어가는게 목표인 봇. 왜냐면, 시�
 	•	NHL은 라인/골리(Goalie)가 핵심이라 “선발 골리” 붙이는 순간 파워가 커짐
 	•	다만 데이터 소스/매칭이 귀찮아서 파이프라인 완성 후에 붙이는 게 맞음
 
-    

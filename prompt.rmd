@@ -1,361 +1,1035 @@
 
-# nhl_quant_bot.py
-from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date as _date
-from typing import Optional, Dict, Any, List
+다음, nhl_quant_main.py 파일은, 두가지 버전으로 가야해. 
+하나는, nhl_quant_main.py
+또 하나는, nhl_qant_main_next_day.py
 
-import numpy as np
-import pandas as pd
-
-from nhl_api_client import NHLDataClient
-from odds_client import OddsAPIClient
-
-from nhl_feature_engineering import build_training_dataset, build_today_dataset
-from nhl_quant_model import NHLQuantModel
-from nhl_goal_diff_model import NHLGoalDiffModel
-
-from nhl_edge import add_edge_from_odds, filter_bets
-from email_management import send_daily_eval_report
-
-
-# -------------------------
-# Helpers
-# -------------------------
-def _safe_date(x) -> _date:
-    if isinstance(x, _date):
-        return x
-    return pd.to_datetime(x).date()
-
-
-def _get_training_seasons(n_seasons: int = 3) -> list[int]:
-    """
-    NHL도 NBA와 동일한 "시즌 시작=10월" convention으로 처리.
-    예)
-      - 2026-01 (시즌 진행중): current=2025, last_completed=2024
-    """
-    today = _date.today()
-    current_season = today.year if today.month >= 10 else today.year - 1
-    last_completed = current_season - 1
-    start = last_completed - (n_seasons - 1)
-    return list(range(start, last_completed + 1))
-
-
-@dataclass
-class NHLRunResult:
-    today: _date
-    n_games_today: int
-    n_odds_rows: int
-    n_scored_rows: int
-    n_edge_rows: int
-    n_bets: int
-
-
-class NHLQuantBot:
-    """
-    End-to-end orchestrator (NHL):
-      1) Fetch raw games (train seasons)
-      2) Build training dataset
-      3) Train/load models (win + goal_diff)
-      4) Fetch today's games
-      5) Build today features
-      6) Predict
-      7) Merge with odds -> edge -> filter bets
-      8) Email report
-    """
-
-    def __init__(
-        self,
-        n_train_seasons: int = 3,
-        prefer_load_models: bool = True,
-        regions: str = "us",
-        preferred_bookmaker: Optional[str] = None,
-        market_blend_alpha: float = 0.7,
-        min_edge: float = 0.03,
-    ):
-        self.n_train_seasons = int(n_train_seasons)
-        self.prefer_load_models = bool(prefer_load_models)
-        self.regions = regions
-        self.preferred_bookmaker = preferred_bookmaker
-        self.market_blend_alpha = float(market_blend_alpha)
-        self.min_edge = float(min_edge)
-
-        self.api = NHLDataClient()
-        self.odds = OddsAPIClient()
-
-    # -------------------------
-    # Core steps
-    # -------------------------
-    def _load_or_train_models(
-        self,
-        train_df: pd.DataFrame,
-        feature_cols: List[str],
-    ) -> tuple[NHLQuantModel, NHLGoalDiffModel]:
-        # 1) win model
-        win_model = None
-        if self.prefer_load_models:
-            try:
-                win_model = NHLQuantModel.load_from_disk()
-            except Exception:
-                win_model = None
-
-        if win_model is None:
-            win_model = NHLQuantModel()
-            win_model.train_walkforward(
-                train_df,
-                feature_cols,
-                n_splits=5,
-                save=True,
-                eval_mode="holdout",
-                holdout_frac=0.20,
-                min_holdout_rows=200,
-            )
-
-        # 2) goal diff model
-        gd_model = None
-        if self.prefer_load_models:
-            try:
-                gd_model = NHLGoalDiffModel.load_from_disk()
-            except Exception:
-                gd_model = None
-
-        if gd_model is None:
-            gd_model = NHLGoalDiffModel()
-            gd_model.train_walkforward(
-                train_df,
-                feature_cols,
-                n_splits=5,
-                save=True,
-            )
-
-        return win_model, gd_model
-
-    def _fetch_training_raw_games(self) -> pd.DataFrame:
-        seasons = _get_training_seasons(self.n_train_seasons)
-        print(f"[NHL BOT] Fetching games for seasons: {seasons}")
-        raw_games = self.api.fetch_games_by_season(seasons)
-        if raw_games is None or raw_games.empty:
-            raise RuntimeError("[NHL BOT] No games fetched for training.")
-        return raw_games
-
-    def _fetch_today_games(self, today: _date) -> pd.DataFrame:
-        tg = self.api.fetch_games_by_date_df(today)
-        if tg is None or tg.empty:
-            print("[NHL BOT] No NHL games today.")
-            return pd.DataFrame()
-        return tg
-
-    # -------------------------
-    # Public run
-    # -------------------------
-    def run(self, today: Optional[_date] = None, send_email: bool = True) -> NHLRunResult:
-        today = today or _date.today()
-        today = _safe_date(today)
-        print(f"[NHL BOT] Run date = {today}")
-
-        # -------------------------
-        # 1) Training raw games
-        # -------------------------
-        raw_games = self._fetch_training_raw_games()
-        print(f"[NHL BOT] Training raw games rows = {len(raw_games)}")
-
-        # -------------------------
-        # 2) Build training dataset
-        # -------------------------
-        train_df, feature_cols = build_training_dataset(raw_games)
-        if train_df is None or train_df.empty:
-            raise RuntimeError("[NHL BOT] build_training_dataset returned empty.")
-        print(f"[NHL BOT] train rows={len(train_df)} features={len(feature_cols)}")
-
-        # -------------------------
-        # 3) Load or train models
-        # -------------------------
-        win_model, gd_model = self._load_or_train_models(train_df, feature_cols)
-
-        # -------------------------
-        # 4) Fetch today games
-        # -------------------------
-        today_games = self._fetch_today_games(today)
-        n_games_today = 0 if today_games.empty else int(today_games["game_id"].nunique())
-        print(f"[NHL BOT] today games={n_games_today}")
-
-        if today_games.empty:
-            # 이메일은 "오늘 경기 없음"만 보내는 것도 가능
-            if send_email:
-                try:
-                    send_daily_eval_report(
-                        sports="NHL",
-                        date=str(today),
-                        bets_df=pd.DataFrame(),
-                        all_edges_df=pd.DataFrame(),
-                        extra_text="No NHL games found for today.",
-                    )
-                except TypeError:
-                    # 기존 email_management 시그니처가 다를 수 있어 방어
-                    send_daily_eval_report(pd.DataFrame(), pd.DataFrame())
-            return NHLRunResult(
-                today=today,
-                n_games_today=0,
-                n_odds_rows=0,
-                n_scored_rows=0,
-                n_edge_rows=0,
-                n_bets=0,
-            )
-
-        # -------------------------
-        # 5) Build today dataset (features)
-        # -------------------------
-        today_df, _ = build_today_dataset(raw_games=raw_games, today_games=today_games, today=today)
-        if today_df is None or today_df.empty:
-            raise RuntimeError("[NHL BOT] build_today_dataset returned empty.")
-        print(f"[NHL BOT] today feature rows={len(today_df)}")
-
-        # -------------------------
-        # 6) Predict (win + goal_diff)
-        # -------------------------
-        scored = win_model.predict_proba(today_df)
-        scored = gd_model.predict_goal_diff(scored)
-
-        # unify columns expected by nhl_edge
-        # - nhl_edge.add_edge_from_odds expects p_home_win column (and optionally p_home_win_from_margin)
-        if "p_home_win" not in scored.columns and "p_home_win_adj" in scored.columns:
-            scored["p_home_win"] = scored["p_home_win_adj"]
-
-        # prefer margin-derived probability name that nhl_edge uses
-        if "p_home_win_from_goal_diff" in scored.columns and "p_home_win_from_margin" not in scored.columns:
-            scored["p_home_win_from_margin"] = scored["p_home_win_from_goal_diff"]
-
-        # -------------------------
-        # 7) Odds + edge + filter
-        # -------------------------
-        odds_df = self.odds.fetch_nhl_moneyline_odds(regions=self.regions, attach_game_id=True)
-        n_odds_rows = 0 if odds_df is None else len(odds_df)
-        print(f"[NHL BOT] odds rows={n_odds_rows}")
-
-        edges = add_edge_from_odds(
-            scored_games=scored,
-            odds_df=odds_df,
-            preferred_bookmaker=self.preferred_bookmaker,
-            market_blend_alpha=self.market_blend_alpha,
-            odds_history_df=None,  # 나중에 snapshot 저장 붙이면 넣자
-        )
-        n_edge_rows = 0 if edges is None or edges.empty else len(edges)
-        print(f"[NHL BOT] edge rows={n_edge_rows}")
-
-        bets = filter_bets(edges, min_edge=self.min_edge, use_strategy_config=True)
-        n_bets = 0 if bets is None or bets.empty else len(bets)
-        print(f"[NHL BOT] bets rows={n_bets}")
-
-        # -------------------------
-        # 8) Email
-        # -------------------------
-        if send_email:
-            try:
-                # 추천: email_management.py가 sports/date/df를 받도록 설계했을 가능성
-                send_daily_eval_report(
-                    sports="NHL",
-                    date=str(today),
-                    bets_df=bets,
-                    all_edges_df=edges,
-                    extra_text=None,
-                )
-            except TypeError:
-                # 기존 시그니처 방어: (bets_df, edges_df)만 받는 형태면 여기로
-                send_daily_eval_report(bets, edges)
-
-        return NHLRunResult(
-            today=today,
-            n_games_today=n_games_today,
-            n_odds_rows=n_odds_rows,
-            n_scored_rows=len(scored),
-            n_edge_rows=n_edge_rows,
-            n_bets=n_bets,
-        )
-
-
-
----
-
-
-
-# nba_quant_bot.py
-
-import numpy as np
-import pandas as pd
-
-
-def american_to_prob(odds: float) -> float:
-    """
-    미국식 오즈 → 암묵 승률
-      -150 → 60.0%
-      +120 → 45.45%
-    """
-    o = float(odds)
-    if o == 0:
-        return np.nan
-    if o > 0:
-        return 100.0 / (o + 100.0)
-    else:
-        return -o / (-o + 100.0)
-
-
-def add_edge_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    입력 df 형식 (predict_win_proba() 후):
-
-      - p_home_win       (모델 예측)
-      - side             'home' 또는 'away'
-      - american_odds    (또는 decimal_odds 컬럼을 써도 됨 – 여기선 미국식 가정)
-
-    로직:
-      - side == 'home': model_p = p_home_win
-      - side == 'away': model_p = 1 - p_home_win
-
-      - implied_p = american_odds → 확률 변환
-      - edge = model_p - implied_p
-
-    """
-    df = df.copy()
-
-    if "side" not in df.columns:
-        raise ValueError("nba_today must contain 'side' column (home/away).")
-    if "american_odds" not in df.columns:
-        raise ValueError("nba_today must contain 'american_odds' column.")
-
-    # 모델 기준 확률
-    model_p = []
-    for _, row in df.iterrows():
-        side = str(row["side"]).lower()
-        p_home = float(row["p_home_win"])
-        if side == "home":
-            model_p.append(p_home)
-        elif side == "away":
-            model_p.append(1.0 - p_home)
-        else:
-            model_p.append(np.nan)
-
-    df["model_p"] = model_p
-
-    # 암묵 승률
-    df["implied_p"] = df["american_odds"].astype(float).map(american_to_prob)
-
-    # edge
-    df["edge"] = df["model_p"] - df["implied_p"]
-
-    # 정렬: edge 큰 순서
-    df.sort_values("edge", ascending=False, inplace=True)
-    return df
-
-
-def filter_bets(df: pd.DataFrame, min_edge: float = 0.03) -> pd.DataFrame:
-    """
-    edge >= min_edge (예: 3%) 만 추천.
-    """
-    return df[df["edge"] >= min_edge].copy()
-
+이렇게. 
+아래보고 참고해서 같은 원리로 해줘. 특히 타이밍. 시간 관련해서 mess up 하지 말고. 
 
 
 ===
 
-자 이거 nba 버전 참고해서 만들어봐. 
+# nba_quant_main.py
+
+
+import os
+
+import pandas as pd
+import numpy as np
+
+from config import DATA_DIR
+from nba_api_client import NBADataClient
+from nba_feature_engineering import build_training_dataset, build_today_dataset
+from nba_quant_model import NBAQuantModel
+from nba_margin_model import NBAMarginModel
+from odds_client import OddsAPIClient
+from nba_edge import add_edge_from_odds, filter_bets
+from email_management import send_nba_daily_report
+from nba_performance import update_bet_log_and_summary
+from nba_strategy_tuning import tune_strategy_from_log
+
+from nba_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
+
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+
+
+
+
+
+
+
+def _add_ensemble_prob(scored_games: pd.DataFrame) -> pd.DataFrame:
+    """
+    XGB (라인업 반영) + Margin 회귀 + Elo 승률을 섞어서
+    최종 p_home_win을 ensemble 버전으로 덮어쓴다.
+    """
+    df = scored_games.copy()
+
+    # 1) XGB + 라인업 반영 확률 (있으면 그거, 없으면 기본 p_home_win)
+    if "p_home_win_adj" in df.columns:
+        p_xgb = df["p_home_win_adj"].astype(float)
+    else:
+        p_xgb = df["p_home_win"].astype(float)
+
+    # 2) 마진 기반 확률 (없으면 p_xgb 그대로 사용)
+    if "p_home_win_from_margin" in df.columns:
+        p_margin = df["p_home_win_from_margin"].astype(float)
+    else:
+        p_margin = p_xgb
+
+    # 3) Elo 기반 승률 (diff_elo_like → 홈 Elo - 어웨이 Elo)
+    if "diff_elo_like" in df.columns:
+        diff_elo = df["diff_elo_like"].astype(float)
+        # Elo 기대 승률: Eh = 1 / (1 + 10^(-diff/400))
+        p_elo = 1.0 / (1.0 + 10.0 ** (-diff_elo / 400.0))
+    else:
+        p_elo = p_xgb
+
+    # 4) 가중치 (초기값 – 나중에 로그 보고 튜닝 가능)
+    w_xgb = 0.5   # 메인 분류 모델 + 라인업 반영
+    w_margin = 0.3
+    w_elo = 0.2
+
+    total_w = w_xgb + w_margin + w_elo
+    w_xgb /= total_w
+    w_margin /= total_w
+    w_elo /= total_w
+
+    # 디버깅용 컬럼들 남겨두기
+    df["p_home_win_xgb_lineup"] = p_xgb
+    df["p_home_win_elo"] = p_elo
+
+    # 앙상블
+    p_ens = w_xgb * p_xgb + w_margin * p_margin + w_elo * p_elo
+    p_ens = np.clip(p_ens, 0.01, 0.99)
+
+    df["p_home_win_ensemble"] = p_ens
+
+    # 🔥 핵심: downstream 코드는 여전히 'p_home_win'만 보는데,
+    # 그 자리에 ensemble 값을 덮어써서 그대로 사용하게 만든다.
+    df["p_home_win"] = df["p_home_win_ensemble"]
+
+    return df
+
+
+def main():
+    tz_pt = ZoneInfo("America/Los_Angeles")
+    pt_today = datetime.now(tz_pt).date()
+
+    today = pt_today
+    print(f"[NBA MAIN] Running (PT) for date={today}")
+    
+
+
+
+    # 1) 히스토리 로드 (최근 1 시즌)
+    current_year = today.year
+    seasons = [current_year - 1]
+    
+    client = NBADataClient()
+    raw_games = client.fetch_games_by_season(seasons)
+    if raw_games.empty:
+        print("[NBA MAIN] No historical games fetched. Abort.")
+        return
+
+    raw_games["date"] = pd.to_datetime(raw_games["date"]).dt.date
+    raw_games_past = raw_games[raw_games["date"] < today].copy()
+    if raw_games_past.empty:
+        print("[NBA MAIN] No past games before today. Abort.")
+        return
+
+
+    # =========================
+    # ✅ SLATE 선택 (운영용 표준)
+    # - PT 기준 '오늘'을 슬레이트로 확정
+    # - 스케줄(=balldontlie)에서 오늘 경기만 가져옴
+    # - Odds는 같은 PT 날짜로만 필터
+    # =========================
+    tz_pt = ZoneInfo("America/Los_Angeles")
+
+    # (A) schedule 먼저 확정 (PT 하루는 UTC에서 날짜가 갈라질 수 있어 ±1일로 안전하게)
+    start_date = today - timedelta(days=3)
+    end_date = today + timedelta(days=3)
+
+    sched_df = client.fetch_games_by_date_range_df(
+        start_date=start_date,
+        end_date=end_date,
+        per_page=200,
+    )
+
+    if sched_df is None or sched_df.empty:
+        print(f"[NBA MAIN] No scheduled games for {start_date}~{end_date}. Abort.")
+        return
+
+    sched_df = sched_df.copy()
+
+    # 스케줄에서 실제 시작시간 컬럼 찾기 (우선순위)
+    time_col = None
+    for c in ["start_time", "commence_time", "scheduled", "game_datetime", "datetime", "date"]:
+        if c in sched_df.columns:
+            time_col = c
+            break
+
+    print("[SCHED DEBUG] time_col picked:", time_col)
+    print("[SCHED DEBUG] columns:", list(sched_df.columns))
+    print("[SCHED DEBUG] time sample:", sched_df[time_col].head(3).tolist() if time_col else None)
+
+    if time_col is None:
+        print("[NBA MAIN] Schedule missing datetime column. Abort.")
+        return
+
+    # ✅ 핵심: "진짜 시작시간"을 UTC로 파싱 → PT로 변환 → slate_date
+    sched_df["_dt_utc"] = pd.to_datetime(sched_df[time_col], utc=True, errors="coerce")
+    sched_df["slate_date"] = sched_df["_dt_utc"].dt.tz_convert(tz_pt).dt.date
+
+    print("[SCHED DEBUG] slate_date counts (top):")
+    print(sched_df["slate_date"].value_counts().head(5))
+
+    # 오늘(PT) 경기만
+    today_games = sched_df[sched_df["slate_date"] == today].copy()
+    if today_games.empty:
+        print(f"[NBA MAIN] No games found for PT date={today}. Abort.")
+        return
+
+
+    # (B) odds는 "PT 오늘 하루"만 정확히 필터
+    odds_client = OddsAPIClient()
+    odds_df_all = odds_client.fetch_nba_moneyline_odds(regions="us")
+
+    odds_df = pd.DataFrame()
+    if odds_df_all is None or odds_df_all.empty:
+        print("[NBA MAIN] No odds from API. Will SKIP edge/bets.")
+    else:
+        odds_df_all = odds_df_all.copy()
+
+        time_col = None
+        for c in ["start_time", "commence_time", "date"]:
+            if c in odds_df_all.columns:
+                time_col = c
+                break
+
+        odds_df_all["_dt_utc"] = pd.to_datetime(odds_df_all[time_col], utc=True, errors="coerce")
+        odds_df_all["_pt_date"] = odds_df_all["_dt_utc"].dt.tz_convert(tz_pt).dt.date
+        odds_df = odds_df_all[odds_df_all["_pt_date"] == today].copy()
+        odds_df["date"] = today
+        odds_df.drop(columns=["_dt_utc", "_pt_date"], inplace=True, errors="ignore")
+
+    # ✅✅✅ 핵심: odds에 붙어있는 game_id로 slate 확정
+    if odds_df is not None and not odds_df.empty and "game_id" in odds_df.columns:
+        odds_game_ids = (
+            odds_df["game_id"].dropna().astype(int).unique().tolist()
+        )
+        # schedule을 "오늘경기"로 고르지 말고, odds game_id로 고른다
+        today_games = sched_df[sched_df["game_id"].astype(int).isin(odds_game_ids)].copy()
+
+        print(f"[SLATE FIX] odds_game_ids={len(odds_game_ids)} | today_games(after odds filter)={len(today_games)}")
+
+        if today_games.empty:   
+            print("[SLATE FIX] No schedule rows matched odds game_id. Expand schedule date range.")
+            return
+    else:
+        print("[SLATE FIX] Odds empty or missing game_id. Abort.")
+        return
+
+
+
+    print(f"[NBA MAIN] Final slate(PT)={today} | games={len(today_games)} | odds_rows={len(odds_df)}")
+
+
+
+
+
+
+    
+
+
+    # 3) 오늘 경기 feature 데이터셋
+    today_df, feature_cols_today = build_today_dataset(
+        raw_games_past,
+        today_games,
+        today,
+    )
+    if today_df.empty:
+        print("[NBA MAIN] No valid feature rows for today. Abort.")
+        return
+
+    # 4) 모델 로드 + 예측 (승률)
+    model = NBAQuantModel.load_from_disk()
+    scored_games = model.predict_proba(today_df)
+    
+    # ✅ scored_games 날짜를 target_date(UTC)로 강제 고정 (downstream merge 안정화)
+    scored_games["date"] = today
+
+
+    # 🔥 4-1) 마진 회귀 모델 로드 + 예측
+    try:
+        margin_model = NBAMarginModel.load_from_disk()
+        margin_df = margin_model.predict_margin(today_df)
+
+        # game_id 기준으로 margin / margin 기반 승률 merge
+        merge_cols = ["game_id", "margin_pred", "p_home_win_from_margin"]
+        merge_cols = [c for c in merge_cols if c in margin_df.columns]
+
+        scored_games = scored_games.merge(
+            margin_df[merge_cols],
+            on="game_id",
+            how="left",
+        )
+
+        print("\n[NBA MAIN] Margin predictions (sample):")
+        print(
+            scored_games[
+                ["game_id", "home_team", "away_team", "margin_pred", "p_home_win", "p_home_win_from_margin"]
+            ].head()
+        )
+    except Exception as e:
+        print(f"[NBA MAIN] Margin model failed or missing: {e}")
+
+
+    # 🔥 4-1) 라인업 / 부상 기반 feature + 확률 조정
+    try:
+        scored_games = attach_lineup_features(scored_games, today)
+        
+        # ===== EXTRA DEBUG (LINEUP / NET RATING) =====
+        nr_cols = [
+            "lineup_net_rating_today_home",
+            "lineup_net_rating_today_away",
+            "lineup_net_rating_diff_home",
+            "lineup_net_rating_diff_away",
+        ]
+        for c in nr_cols:
+            if c in scored_games.columns:
+                s = scored_games[c].astype(float)
+                print(f"[CHECK] {c}: nonzero_rate={(s.abs()>1e-9).mean():.2f}, "
+                    f"min={s.min():.3f}, mean={s.mean():.3f}, max={s.max():.3f}")
+
+        # depth 분포도 같이 확인
+        for c in ["lineup_depth_score_home", "lineup_depth_score_away"]:
+            if c in scored_games.columns:
+                s = scored_games[c].astype(float)
+                print(f"[CHECK] {c}: min={s.min():.3f}, mean={s.mean():.3f}, max={s.max():.3f}")
+        # ============================================
+
+
+
+        scored_games = adjust_prob_with_lineup(scored_games)
+        
+        # adjust_prob_with_lineup 이후 바로 아래에 추가
+        if "z_star_penalty" in scored_games.columns:
+            tmp = scored_games.copy()
+            tmp["abs_z_star"] = tmp["z_star_penalty"].astype(float).abs()
+            top = tmp.sort_values("abs_z_star", ascending=False).head(3)
+
+            print("\n[CHECK] Top star-penalty games (abs z_star_penalty):")
+            show_cols = [
+                "game_id", "home_team", "away_team",
+                "p_home_win", "p_home_win_adj",
+                "lineup_missing_star_score_home", "lineup_missing_star_score_away",
+                "z_star_penalty", "z_lineup_total",
+            ]
+            show_cols = [c for c in show_cols if c in top.columns]
+            print(top[show_cols])
+
+        
+        if "p_home_win_adj" in scored_games.columns:
+            delta = (scored_games["p_home_win_adj"].astype(float) - scored_games["p_home_win"].astype(float))
+            print(f"[CHECK] prob_adj delta: min={delta.min():.4f}, mean={delta.mean():.4f}, max={delta.max():.4f}")
+
+
+
+        
+        print("\n[CHECK] lineup_depth NA rate (home,away):",
+             scored_games["lineup_depth_score_home"].isna().mean(),
+             scored_games["lineup_depth_score_away"].isna().mean())
+
+        print("[CHECK] missing_star_flag sums (home,away):",
+             int(scored_games["lineup_missing_star_flag_home"].fillna(0).sum()),
+             int(scored_games["lineup_missing_star_flag_away"].fillna(0).sum()))
+
+        
+        # 🔍 DEBUG: lineup + net rating이 실제로 확률에 반영됐는지 확인
+        cols_debug = [
+            "game_id",
+            "home_team",
+            "away_team",
+            "p_home_win",
+            "p_home_win_adj",
+            "lineup_depth_score_home",
+            "lineup_depth_score_away",
+            "lineup_net_rating_today_home",
+            "lineup_net_rating_today_away",
+            "lineup_net_rating_diff_home",
+            "lineup_net_rating_diff_away",
+        ]
+
+        print("\n[NBA MAIN] Scored games (with FULL lineup+net features):")
+        print(scored_games[[c for c in cols_debug if c in scored_games.columns]])
+
+    except Exception as e:
+        print(f"[NBA MAIN] Lineup/Injury enrichment failed: {e}")
+
+        # ✅ fail-hard 에러면 즉시 중단
+        if "NBA LINEUP FAIL-HARD" in str(e):
+            raise
+
+        # 그 외 일시적 API 오류 등만 fallback 허용하고 싶으면 여기서 continue
+        print("[NBA MAIN] Continue WITHOUT lineup-based adjustment (use base p_home_win).")
+
+
+    print("[NBA MAIN] Scored games (with lineup features):")
+
+    # 🔥 4-2) XGB (라인업) + Margin + Elo 앙상블
+    try:
+        scored_games = _add_ensemble_prob(scored_games)
+
+        # ✅ 중요: downstream에서 여전히 'p_home_win_adj'를 보더라도
+        # 이미 앙상블 확률을 보도록 덮어쓰기
+        if "p_home_win_adj" in scored_games.columns:
+            scored_games["p_home_win_adj"] = scored_games["p_home_win"]
+
+        print("\n[NBA MAIN] Ensemble probabilities (sample):")
+        cols_ens = [
+            "game_id",
+            "home_team",
+            "away_team",
+            "p_home_win_xgb_lineup",
+            "p_home_win_from_margin",
+            "p_home_win_elo",
+            "p_home_win_ensemble",
+        ]
+        print(scored_games[[c for c in cols_ens if c in scored_games.columns]])
+    except Exception as e:
+        print(f"[NBA MAIN] Ensemble prob failed: {e}")
+        # 실패하면 그냥 기존 p_home_win 사용 (scored_games 그대로)
+
+
+    cols_to_show = [
+        "game_id", "date", "home_team", "away_team",
+        "p_home_win", "p_home_win_adj",
+        "lineup_depth_score_home", "lineup_depth_score_away",
+        "lineup_missing_star_flag_home", "lineup_missing_star_flag_away",
+    ]
+    print(scored_games[[c for c in cols_to_show if c in scored_games.columns]])
+
+
+    # ✅ odds가 비어있으면 edge/bets 파트는 실행 불가
+    if odds_df is None or odds_df.empty:
+        print("[NBA MAIN] Odds empty → skip edge/bets/email/trading.")
+        return
+
+
+
+    # 6) edge 계산 (게임 × side)
+    edge_df = add_edge_from_odds(scored_games, odds_df)
+    if edge_df.empty:
+        print("[NBA MAIN] Could not match any odds to games. Abort.")
+
+        # =========================
+        # ✅ ODDS MATCH DEBUG (DROP-IN)
+        # - 날짜 mismatch(UTC/PT)인지
+        # - 팀명 mismatch(Clippers/76ers 표기 등)인지
+        #   빠르게 판단하기 위한 로그
+        # =========================
+        try:
+            # 1) date 범위 비교 (둘 다 있으면)
+            if "date" in scored_games.columns:
+                sg_dates = pd.to_datetime(scored_games["date"], errors="coerce").dt.date
+                print(f"[ODDS DEBUG] scored_games date range: {sg_dates.min()} ~ {sg_dates.max()}")
+
+            if "date" in odds_df.columns:
+                od_dates = pd.to_datetime(odds_df["date"], errors="coerce").dt.date
+                print(f"[ODDS DEBUG] odds_df date range: {od_dates.min()} ~ {od_dates.max()}")
+
+            # 2) 팀명 샘플 비교 (home/away 컬럼명이 다를 수도 있으니 안전하게 후보로 찾음)
+            def _pick_col(df, candidates):
+                for c in candidates:
+                    if c in df.columns:
+                        return c
+                return None
+
+            sg_home = _pick_col(scored_games, ["home_team", "home_team_name"])
+            sg_away = _pick_col(scored_games, ["away_team", "away_team_name"])
+            od_home = _pick_col(odds_df, ["home_team", "home_team_name"])
+            od_away = _pick_col(odds_df, ["away_team", "away_team_name"])
+
+            if sg_home and sg_away:
+                sg_teams = pd.unique(pd.concat([scored_games[sg_home], scored_games[sg_away]]).dropna().astype(str))
+                sg_teams = sorted(set([t.strip() for t in sg_teams if t.strip()]))
+                print("[ODDS DEBUG] scored_games teams sample:", sg_teams[:30])
+
+            if od_home and od_away:
+                od_teams = pd.unique(pd.concat([odds_df[od_home], odds_df[od_away]]).dropna().astype(str))
+                od_teams = sorted(set([t.strip() for t in od_teams if t.strip()]))
+                print("[ODDS DEBUG] odds_df teams sample:", od_teams[:30])
+
+            # 3) 교집합 크기 (팀명 mismatch 여부 감지)
+            if (sg_home and sg_away) and (od_home and od_away):
+                inter = sorted(set(sg_teams).intersection(set(od_teams)))
+                print(f"[ODDS DEBUG] team intersection count={len(inter)} (sample={inter[:20]})")
+
+                # mismatch candidates (scored에만 있거나 odds에만 있는 팀)
+                sg_only = sorted(set(sg_teams) - set(od_teams))
+                od_only = sorted(set(od_teams) - set(sg_teams))
+                print(f"[ODDS DEBUG] teams only in scored_games (sample): {sg_only[:20]}")
+                print(f"[ODDS DEBUG] teams only in odds_df (sample): {od_only[:20]}")
+
+            # 4) odds_df 상위 몇 줄 dump (구조 확인)
+            print("[ODDS DEBUG] odds_df head:")
+            print(odds_df.head(5))
+
+        except Exception as e:
+            print(f"[ODDS DEBUG] failed to print debug info: {e}")
+
+        return
+
+
+    print("\n=== ALL GAMES with edge ===")
+    print(
+        edge_df[
+            [
+                "game_id",
+                "date",
+                "home_team",
+                "away_team",
+                "side",
+                "team",
+                "bookmaker",
+                "american_odds",
+                "model_p",
+                "implied_p",
+                "edge",
+            ]
+        ].sort_values("edge", ascending=False)
+    )
+
+    # 7) 추천 필터
+    reco_df = filter_bets(
+        edge_df,
+        min_edge=0.03,
+        use_bucket_rules=True,
+        use_strategy_config=True,
+    )
+    
+    
+
+    print("\n=== RECOMMENDED BETS (edge >= 3%) ===")
+    if reco_df.empty:
+        print("No bets with sufficient edge.")
+    else:
+        print(
+            reco_df[
+                [
+                    "game_id",
+                    "date",
+                    "home_team",
+                    "away_team",
+                    "side",
+                    "team",
+                    "bookmaker",
+                    "american_odds",
+                    "model_p",
+                    "implied_p",
+                    "edge",
+                ]
+            ]
+        )
+
+    # 8) 성능 로그/요약 업데이트 (앞으로 쌓이는 live performance tracker)
+    _, perf_summary = update_bet_log_and_summary(
+        reco_df=reco_df,
+        raw_games_past=raw_games_past,
+        today=today,
+        stake_per_bet=100.0,  # 원하면 나중에 env로 뺄 수 있음
+    )
+
+    # 9) 이메일 발송 (성과 요약 포함)
+    send_nba_daily_report(
+        reco_df=reco_df,
+        full_df=edge_df,
+        perf_summary=perf_summary,
+    )
+
+
+
+if __name__ == "__main__":
+    main()
+    
+
+
+
+
+
+=====
+
+# nba_quant_main.py
+
+
+import os
+
+import pandas as pd
+import numpy as np
+
+from config import DATA_DIR
+from nba_api_client import NBADataClient
+from nba_feature_engineering import build_training_dataset, build_today_dataset
+from nba_quant_model import NBAQuantModel
+from nba_margin_model import NBAMarginModel
+from odds_client import OddsAPIClient
+from nba_edge import add_edge_from_odds, filter_bets
+from email_management import send_nba_daily_report
+from nba_performance import update_bet_log_and_summary
+from nba_strategy_tuning import tune_strategy_from_log
+
+from nba_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
+
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+
+
+
+
+
+
+
+def _add_ensemble_prob(scored_games: pd.DataFrame) -> pd.DataFrame:
+    """
+    XGB (라인업 반영) + Margin 회귀 + Elo 승률을 섞어서
+    최종 p_home_win을 ensemble 버전으로 덮어쓴다.
+    """
+    df = scored_games.copy()
+
+    # 1) XGB + 라인업 반영 확률 (있으면 그거, 없으면 기본 p_home_win)
+    if "p_home_win_adj" in df.columns:
+        p_xgb = df["p_home_win_adj"].astype(float)
+    else:
+        p_xgb = df["p_home_win"].astype(float)
+
+    # 2) 마진 기반 확률 (없으면 p_xgb 그대로 사용)
+    if "p_home_win_from_margin" in df.columns:
+        p_margin = df["p_home_win_from_margin"].astype(float)
+    else:
+        p_margin = p_xgb
+
+    # 3) Elo 기반 승률 (diff_elo_like → 홈 Elo - 어웨이 Elo)
+    if "diff_elo_like" in df.columns:
+        diff_elo = df["diff_elo_like"].astype(float)
+        # Elo 기대 승률: Eh = 1 / (1 + 10^(-diff/400))
+        p_elo = 1.0 / (1.0 + 10.0 ** (-diff_elo / 400.0))
+    else:
+        p_elo = p_xgb
+
+    # 4) 가중치 (초기값 – 나중에 로그 보고 튜닝 가능)
+    w_xgb = 0.5   # 메인 분류 모델 + 라인업 반영
+    w_margin = 0.3
+    w_elo = 0.2
+
+    total_w = w_xgb + w_margin + w_elo
+    w_xgb /= total_w
+    w_margin /= total_w
+    w_elo /= total_w
+
+    # 디버깅용 컬럼들 남겨두기
+    df["p_home_win_xgb_lineup"] = p_xgb
+    df["p_home_win_elo"] = p_elo
+
+    # 앙상블
+    p_ens = w_xgb * p_xgb + w_margin * p_margin + w_elo * p_elo
+    p_ens = np.clip(p_ens, 0.01, 0.99)
+
+    df["p_home_win_ensemble"] = p_ens
+
+    # 🔥 핵심: downstream 코드는 여전히 'p_home_win'만 보는데,
+    # 그 자리에 ensemble 값을 덮어써서 그대로 사용하게 만든다.
+    df["p_home_win"] = df["p_home_win_ensemble"]
+
+    return df
+
+
+def main():
+    tz_pt = ZoneInfo("America/Los_Angeles")
+    pt_today = datetime.now(tz_pt).date()
+
+    today = pt_today
+    print(f"[NBA MAIN] Running (PT) for date={today}")
+    
+
+
+
+    # 1) 히스토리 로드 (최근 1 시즌)
+    current_year = today.year
+    seasons = [current_year - 1]
+    
+    client = NBADataClient()
+    raw_games = client.fetch_games_by_season(seasons)
+    if raw_games.empty:
+        print("[NBA MAIN] No historical games fetched. Abort.")
+        return
+
+    raw_games["date"] = pd.to_datetime(raw_games["date"]).dt.date
+    raw_games_past = raw_games[raw_games["date"] < today].copy()
+    if raw_games_past.empty:
+        print("[NBA MAIN] No past games before today. Abort.")
+        return
+
+
+    # =========================
+    # ✅ SLATE 선택 (운영용 표준)
+    # - PT 기준 '오늘'을 슬레이트로 확정
+    # - 스케줄(=balldontlie)에서 오늘 경기만 가져옴
+    # - Odds는 같은 PT 날짜로만 필터
+    # =========================
+    tz_pt = ZoneInfo("America/Los_Angeles")
+
+    # (A) schedule 먼저 확정 (PT 하루는 UTC에서 날짜가 갈라질 수 있어 ±1일로 안전하게)
+    start_date = today - timedelta(days=1)
+    end_date = today + timedelta(days=1)
+
+    sched_df = client.fetch_games_by_date_range_df(
+        start_date=start_date,
+        end_date=end_date,
+        per_page=200,
+    )
+    if sched_df.empty:
+        print(f"[NBA MAIN] No scheduled games for {start_date}~{end_date}. Abort.")
+        return
+
+    sched_df = sched_df.copy()
+    sched_df["_dt_utc"] = pd.to_datetime(sched_df["date"], utc=True, errors="coerce")
+    sched_df["slate_date"] = sched_df["_dt_utc"].dt.tz_convert(tz_pt).dt.date
+
+    today_games = sched_df[sched_df["slate_date"] == today].copy()
+    if today_games.empty:
+        print(f"[NBA MAIN] No games found for PT date={today}. Abort.")
+        return
+
+    # (B) odds는 같은 PT 날짜로만 필터 (없으면 edge/bet은 스킵)
+    odds_client = OddsAPIClient()
+    odds_df_all = odds_client.fetch_nba_moneyline_odds(regions="us")
+
+    odds_df = pd.DataFrame()
+    if odds_df_all.empty:
+        print("[NBA MAIN] No odds from API. Will SKIP edge/bets.")
+    else:
+        odds_df_all = odds_df_all.copy()
+        odds_df_all["_pt_date"] = pd.to_datetime(
+            odds_df_all["start_time"], utc=True, errors="coerce"
+        ).dt.tz_convert(tz_pt).dt.date
+
+        odds_df = odds_df_all[
+            odds_df_all["_pt_date"].between(
+                today - timedelta(days=1),
+                today + timedelta(days=2),
+            )
+        ].copy()
+        
+        odds_df.drop(columns=["_pt_date"], inplace=True, errors="ignore")
+
+        if odds_df.empty:
+            print(f"[NBA MAIN] No odds matched PT date={today}. Will SKIP edge/bets.")
+
+    print(f"[NBA MAIN] Final slate(PT)={today} | games={len(today_games)} | odds_rows={len(odds_df)}")
+    # =========================
+
+
+
+
+
+    
+
+
+    # 3) 오늘 경기 feature 데이터셋
+    today_df, feature_cols_today = build_today_dataset(
+        raw_games_past,
+        today_games,
+        today,
+    )
+    if today_df.empty:
+        print("[NBA MAIN] No valid feature rows for today. Abort.")
+        return
+
+    # 4) 모델 로드 + 예측 (승률)
+    model = NBAQuantModel.load_from_disk()
+    scored_games = model.predict_proba(today_df)
+    
+    # ✅ scored_games 날짜를 target_date(UTC)로 강제 고정 (downstream merge 안정화)
+    scored_games["date"] = today
+
+
+    # 🔥 4-1) 마진 회귀 모델 로드 + 예측
+    try:
+        margin_model = NBAMarginModel.load_from_disk()
+        margin_df = margin_model.predict_margin(today_df)
+
+        # game_id 기준으로 margin / margin 기반 승률 merge
+        merge_cols = ["game_id", "margin_pred", "p_home_win_from_margin"]
+        merge_cols = [c for c in merge_cols if c in margin_df.columns]
+
+        scored_games = scored_games.merge(
+            margin_df[merge_cols],
+            on="game_id",
+            how="left",
+        )
+
+        print("\n[NBA MAIN] Margin predictions (sample):")
+        print(
+            scored_games[
+                ["game_id", "home_team", "away_team", "margin_pred", "p_home_win", "p_home_win_from_margin"]
+            ].head()
+        )
+    except Exception as e:
+        print(f"[NBA MAIN] Margin model failed or missing: {e}")
+
+
+    # 🔥 4-1) 라인업 / 부상 기반 feature + 확률 조정
+    try:
+        scored_games = attach_lineup_features(scored_games, today)
+        
+        # ===== EXTRA DEBUG (LINEUP / NET RATING) =====
+        nr_cols = [
+            "lineup_net_rating_today_home",
+            "lineup_net_rating_today_away",
+            "lineup_net_rating_diff_home",
+            "lineup_net_rating_diff_away",
+        ]
+        for c in nr_cols:
+            if c in scored_games.columns:
+                s = scored_games[c].astype(float)
+                print(f"[CHECK] {c}: nonzero_rate={(s.abs()>1e-9).mean():.2f}, "
+                    f"min={s.min():.3f}, mean={s.mean():.3f}, max={s.max():.3f}")
+
+        # depth 분포도 같이 확인
+        for c in ["lineup_depth_score_home", "lineup_depth_score_away"]:
+            if c in scored_games.columns:
+                s = scored_games[c].astype(float)
+                print(f"[CHECK] {c}: min={s.min():.3f}, mean={s.mean():.3f}, max={s.max():.3f}")
+        # ============================================
+
+
+
+        scored_games = adjust_prob_with_lineup(scored_games)
+        
+        # adjust_prob_with_lineup 이후 바로 아래에 추가
+        if "z_star_penalty" in scored_games.columns:
+            tmp = scored_games.copy()
+            tmp["abs_z_star"] = tmp["z_star_penalty"].astype(float).abs()
+            top = tmp.sort_values("abs_z_star", ascending=False).head(3)
+
+            print("\n[CHECK] Top star-penalty games (abs z_star_penalty):")
+            show_cols = [
+                "game_id", "home_team", "away_team",
+                "p_home_win", "p_home_win_adj",
+                "lineup_missing_star_score_home", "lineup_missing_star_score_away",
+                "z_star_penalty", "z_lineup_total",
+            ]
+            show_cols = [c for c in show_cols if c in top.columns]
+            print(top[show_cols])
+
+        
+        if "p_home_win_adj" in scored_games.columns:
+            delta = (scored_games["p_home_win_adj"].astype(float) - scored_games["p_home_win"].astype(float))
+            print(f"[CHECK] prob_adj delta: min={delta.min():.4f}, mean={delta.mean():.4f}, max={delta.max():.4f}")
+
+
+
+        
+        print("\n[CHECK] lineup_depth NA rate (home,away):",
+             scored_games["lineup_depth_score_home"].isna().mean(),
+             scored_games["lineup_depth_score_away"].isna().mean())
+
+        print("[CHECK] missing_star_flag sums (home,away):",
+             int(scored_games["lineup_missing_star_flag_home"].fillna(0).sum()),
+             int(scored_games["lineup_missing_star_flag_away"].fillna(0).sum()))
+
+        
+        # 🔍 DEBUG: lineup + net rating이 실제로 확률에 반영됐는지 확인
+        cols_debug = [
+            "game_id",
+            "home_team",
+            "away_team",
+            "p_home_win",
+            "p_home_win_adj",
+            "lineup_depth_score_home",
+            "lineup_depth_score_away",
+            "lineup_net_rating_today_home",
+            "lineup_net_rating_today_away",
+            "lineup_net_rating_diff_home",
+            "lineup_net_rating_diff_away",
+        ]
+
+        print("\n[NBA MAIN] Scored games (with FULL lineup+net features):")
+        print(scored_games[[c for c in cols_debug if c in scored_games.columns]])
+
+    except Exception as e:
+        print(f"[NBA MAIN] Lineup/Injury enrichment failed: {e}")
+
+        # ✅ fail-hard 에러면 즉시 중단
+        if "NBA LINEUP FAIL-HARD" in str(e):
+            raise
+
+        # 그 외 일시적 API 오류 등만 fallback 허용하고 싶으면 여기서 continue
+        print("[NBA MAIN] Continue WITHOUT lineup-based adjustment (use base p_home_win).")
+
+
+    print("[NBA MAIN] Scored games (with lineup features):")
+
+    # 🔥 4-2) XGB (라인업) + Margin + Elo 앙상블
+    try:
+        scored_games = _add_ensemble_prob(scored_games)
+
+        # ✅ 중요: downstream에서 여전히 'p_home_win_adj'를 보더라도
+        # 이미 앙상블 확률을 보도록 덮어쓰기
+        if "p_home_win_adj" in scored_games.columns:
+            scored_games["p_home_win_adj"] = scored_games["p_home_win"]
+
+        print("\n[NBA MAIN] Ensemble probabilities (sample):")
+        cols_ens = [
+            "game_id",
+            "home_team",
+            "away_team",
+            "p_home_win_xgb_lineup",
+            "p_home_win_from_margin",
+            "p_home_win_elo",
+            "p_home_win_ensemble",
+        ]
+        print(scored_games[[c for c in cols_ens if c in scored_games.columns]])
+    except Exception as e:
+        print(f"[NBA MAIN] Ensemble prob failed: {e}")
+        # 실패하면 그냥 기존 p_home_win 사용 (scored_games 그대로)
+
+
+    cols_to_show = [
+        "game_id", "date", "home_team", "away_team",
+        "p_home_win", "p_home_win_adj",
+        "lineup_depth_score_home", "lineup_depth_score_away",
+        "lineup_missing_star_flag_home", "lineup_missing_star_flag_away",
+    ]
+    print(scored_games[[c for c in cols_to_show if c in scored_games.columns]])
+
+
+    # ✅ odds가 비어있으면 edge/bets 파트는 실행 불가
+    if odds_df is None or odds_df.empty:
+        print("[NBA MAIN] Odds empty → skip edge/bets/email/trading.")
+        return
+
+
+
+    # 6) edge 계산 (게임 × side)
+    edge_df = add_edge_from_odds(scored_games, odds_df)
+    if edge_df.empty:
+        print("[NBA MAIN] Could not match any odds to games. Abort.")
+
+        # =========================
+        # ✅ ODDS MATCH DEBUG (DROP-IN)
+        # - 날짜 mismatch(UTC/PT)인지
+        # - 팀명 mismatch(Clippers/76ers 표기 등)인지
+        #   빠르게 판단하기 위한 로그
+        # =========================
+        try:
+            # 1) date 범위 비교 (둘 다 있으면)
+            if "date" in scored_games.columns:
+                sg_dates = pd.to_datetime(scored_games["date"], errors="coerce").dt.date
+                print(f"[ODDS DEBUG] scored_games date range: {sg_dates.min()} ~ {sg_dates.max()}")
+
+            if "date" in odds_df.columns:
+                od_dates = pd.to_datetime(odds_df["date"], errors="coerce").dt.date
+                print(f"[ODDS DEBUG] odds_df date range: {od_dates.min()} ~ {od_dates.max()}")
+
+            # 2) 팀명 샘플 비교 (home/away 컬럼명이 다를 수도 있으니 안전하게 후보로 찾음)
+            def _pick_col(df, candidates):
+                for c in candidates:
+                    if c in df.columns:
+                        return c
+                return None
+
+            sg_home = _pick_col(scored_games, ["home_team", "home_team_name"])
+            sg_away = _pick_col(scored_games, ["away_team", "away_team_name"])
+            od_home = _pick_col(odds_df, ["home_team", "home_team_name"])
+            od_away = _pick_col(odds_df, ["away_team", "away_team_name"])
+
+            if sg_home and sg_away:
+                sg_teams = pd.unique(pd.concat([scored_games[sg_home], scored_games[sg_away]]).dropna().astype(str))
+                sg_teams = sorted(set([t.strip() for t in sg_teams if t.strip()]))
+                print("[ODDS DEBUG] scored_games teams sample:", sg_teams[:30])
+
+            if od_home and od_away:
+                od_teams = pd.unique(pd.concat([odds_df[od_home], odds_df[od_away]]).dropna().astype(str))
+                od_teams = sorted(set([t.strip() for t in od_teams if t.strip()]))
+                print("[ODDS DEBUG] odds_df teams sample:", od_teams[:30])
+
+            # 3) 교집합 크기 (팀명 mismatch 여부 감지)
+            if (sg_home and sg_away) and (od_home and od_away):
+                inter = sorted(set(sg_teams).intersection(set(od_teams)))
+                print(f"[ODDS DEBUG] team intersection count={len(inter)} (sample={inter[:20]})")
+
+                # mismatch candidates (scored에만 있거나 odds에만 있는 팀)
+                sg_only = sorted(set(sg_teams) - set(od_teams))
+                od_only = sorted(set(od_teams) - set(sg_teams))
+                print(f"[ODDS DEBUG] teams only in scored_games (sample): {sg_only[:20]}")
+                print(f"[ODDS DEBUG] teams only in odds_df (sample): {od_only[:20]}")
+
+            # 4) odds_df 상위 몇 줄 dump (구조 확인)
+            print("[ODDS DEBUG] odds_df head:")
+            print(odds_df.head(5))
+
+        except Exception as e:
+            print(f"[ODDS DEBUG] failed to print debug info: {e}")
+
+        return
+
+
+    print("\n=== ALL GAMES with edge ===")
+    print(
+        edge_df[
+            [
+                "game_id",
+                "date",
+                "home_team",
+                "away_team",
+                "side",
+                "team",
+                "bookmaker",
+                "american_odds",
+                "model_p",
+                "implied_p",
+                "edge",
+            ]
+        ].sort_values("edge", ascending=False)
+    )
+
+    # 7) 추천 필터
+    reco_df = filter_bets(
+        edge_df,
+        min_edge=0.03,
+        use_bucket_rules=True,
+        use_strategy_config=True,
+    )
+    
+    
+
+    print("\n=== RECOMMENDED BETS (edge >= 3%) ===")
+    if reco_df.empty:
+        print("No bets with sufficient edge.")
+    else:
+        print(
+            reco_df[
+                [
+                    "game_id",
+                    "date",
+                    "home_team",
+                    "away_team",
+                    "side",
+                    "team",
+                    "bookmaker",
+                    "american_odds",
+                    "model_p",
+                    "implied_p",
+                    "edge",
+                ]
+            ]
+        )
+
+    # 8) 성능 로그/요약 업데이트 (앞으로 쌓이는 live performance tracker)
+    _, perf_summary = update_bet_log_and_summary(
+        reco_df=reco_df,
+        raw_games_past=raw_games_past,
+        today=today,
+        stake_per_bet=100.0,  # 원하면 나중에 env로 뺄 수 있음
+    )
+
+    # 9) 이메일 발송 (성과 요약 포함)
+    send_nba_daily_report(
+        reco_df=reco_df,
+        full_df=edge_df,
+        perf_summary=perf_summary,
+    )
+
+
+
+if __name__ == "__main__":
+    main()
+    
+

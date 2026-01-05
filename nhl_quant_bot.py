@@ -1,0 +1,273 @@
+# nhl_quant_bot.py
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date as _date
+from typing import Optional, Dict, Any, List
+
+import numpy as np
+import pandas as pd
+
+from nhl_api_client import NHLDataClient
+from odds_client import OddsAPIClient
+
+from nhl_feature_engineering import build_training_dataset, build_today_dataset
+from nhl_quant_model import NHLQuantModel
+from nhl_goal_diff_model import NHLGoalDiffModel
+
+from nhl_edge import add_edge_from_odds, filter_bets
+from email_management import send_daily_eval_report
+
+
+# -------------------------
+# Helpers
+# -------------------------
+def _safe_date(x) -> _date:
+    if isinstance(x, _date):
+        return x
+    return pd.to_datetime(x).date()
+
+
+def _get_training_seasons(n_seasons: int = 3) -> list[int]:
+    """
+    NHL도 NBA와 동일한 "시즌 시작=10월" convention으로 처리.
+    예)
+      - 2026-01 (시즌 진행중): current=2025, last_completed=2024
+    """
+    today = _date.today()
+    current_season = today.year if today.month >= 10 else today.year - 1
+    last_completed = current_season - 1
+    start = last_completed - (n_seasons - 1)
+    return list(range(start, last_completed + 1))
+
+
+@dataclass
+class NHLRunResult:
+    today: _date
+    n_games_today: int
+    n_odds_rows: int
+    n_scored_rows: int
+    n_edge_rows: int
+    n_bets: int
+
+
+class NHLQuantBot:
+    """
+    End-to-end orchestrator (NHL):
+      1) Fetch raw games (train seasons)
+      2) Build training dataset
+      3) Train/load models (win + goal_diff)
+      4) Fetch today's games
+      5) Build today features
+      6) Predict
+      7) Merge with odds -> edge -> filter bets
+      8) Email report
+    """
+
+    def __init__(
+        self,
+        n_train_seasons: int = 3,
+        prefer_load_models: bool = True,
+        regions: str = "us",
+        preferred_bookmaker: Optional[str] = None,
+        market_blend_alpha: float = 0.7,
+        min_edge: float = 0.03,
+    ):
+        self.n_train_seasons = int(n_train_seasons)
+        self.prefer_load_models = bool(prefer_load_models)
+        self.regions = regions
+        self.preferred_bookmaker = preferred_bookmaker
+        self.market_blend_alpha = float(market_blend_alpha)
+        self.min_edge = float(min_edge)
+
+        self.api = NHLDataClient()
+        self.odds = OddsAPIClient()
+
+    # -------------------------
+    # Core steps
+    # -------------------------
+    def _load_or_train_models(
+        self,
+        train_df: pd.DataFrame,
+        feature_cols: List[str],
+    ) -> tuple[NHLQuantModel, NHLGoalDiffModel]:
+        # 1) win model
+        win_model = None
+        if self.prefer_load_models:
+            try:
+                win_model = NHLQuantModel.load_from_disk()
+            except Exception:
+                win_model = None
+
+        if win_model is None:
+            win_model = NHLQuantModel()
+            win_model.train_walkforward(
+                train_df,
+                feature_cols,
+                n_splits=5,
+                save=True,
+                eval_mode="holdout",
+                holdout_frac=0.20,
+                min_holdout_rows=200,
+            )
+
+        # 2) goal diff model
+        gd_model = None
+        if self.prefer_load_models:
+            try:
+                gd_model = NHLGoalDiffModel.load_from_disk()
+            except Exception:
+                gd_model = None
+
+        if gd_model is None:
+            gd_model = NHLGoalDiffModel()
+            gd_model.train_walkforward(
+                train_df,
+                feature_cols,
+                n_splits=5,
+                save=True,
+            )
+
+        return win_model, gd_model
+
+    def _fetch_training_raw_games(self) -> pd.DataFrame:
+        seasons = _get_training_seasons(self.n_train_seasons)
+        print(f"[NHL BOT] Fetching games for seasons: {seasons}")
+        raw_games = self.api.fetch_games_by_season(seasons)
+        if raw_games is None or raw_games.empty:
+            raise RuntimeError("[NHL BOT] No games fetched for training.")
+        return raw_games
+
+    def _fetch_today_games(self, today: _date) -> pd.DataFrame:
+        tg = self.api.fetch_games_by_date_df(today)
+        if tg is None or tg.empty:
+            print("[NHL BOT] No NHL games today.")
+            return pd.DataFrame()
+        return tg
+
+    # -------------------------
+    # Public run
+    # -------------------------
+    def run(self, today: Optional[_date] = None, send_email: bool = True) -> NHLRunResult:
+        today = today or _date.today()
+        today = _safe_date(today)
+        print(f"[NHL BOT] Run date = {today}")
+
+        # -------------------------
+        # 1) Training raw games
+        # -------------------------
+        raw_games = self._fetch_training_raw_games()
+        print(f"[NHL BOT] Training raw games rows = {len(raw_games)}")
+
+        # -------------------------
+        # 2) Build training dataset
+        # -------------------------
+        train_df, feature_cols = build_training_dataset(raw_games)
+        if train_df is None or train_df.empty:
+            raise RuntimeError("[NHL BOT] build_training_dataset returned empty.")
+        print(f"[NHL BOT] train rows={len(train_df)} features={len(feature_cols)}")
+
+        # -------------------------
+        # 3) Load or train models
+        # -------------------------
+        win_model, gd_model = self._load_or_train_models(train_df, feature_cols)
+
+        # -------------------------
+        # 4) Fetch today games
+        # -------------------------
+        today_games = self._fetch_today_games(today)
+        n_games_today = 0 if today_games.empty else int(today_games["game_id"].nunique())
+        print(f"[NHL BOT] today games={n_games_today}")
+
+        if today_games.empty:
+            # 이메일은 "오늘 경기 없음"만 보내는 것도 가능
+            if send_email:
+                try:
+                    send_daily_eval_report(
+                        sports="NHL",
+                        date=str(today),
+                        bets_df=pd.DataFrame(),
+                        all_edges_df=pd.DataFrame(),
+                        extra_text="No NHL games found for today.",
+                    )
+                except TypeError:
+                    # 기존 email_management 시그니처가 다를 수 있어 방어
+                    send_daily_eval_report(pd.DataFrame(), pd.DataFrame())
+            return NHLRunResult(
+                today=today,
+                n_games_today=0,
+                n_odds_rows=0,
+                n_scored_rows=0,
+                n_edge_rows=0,
+                n_bets=0,
+            )
+
+        # -------------------------
+        # 5) Build today dataset (features)
+        # -------------------------
+        today_df, _ = build_today_dataset(raw_games=raw_games, today_games=today_games, today=today)
+        if today_df is None or today_df.empty:
+            raise RuntimeError("[NHL BOT] build_today_dataset returned empty.")
+        print(f"[NHL BOT] today feature rows={len(today_df)}")
+
+        # -------------------------
+        # 6) Predict (win + goal_diff)
+        # -------------------------
+        scored = win_model.predict_proba(today_df)
+        scored = gd_model.predict_goal_diff(scored)
+
+        # unify columns expected by nhl_edge
+        # - nhl_edge.add_edge_from_odds expects p_home_win column (and optionally p_home_win_from_margin)
+        if "p_home_win" not in scored.columns and "p_home_win_adj" in scored.columns:
+            scored["p_home_win"] = scored["p_home_win_adj"]
+
+        # prefer margin-derived probability name that nhl_edge uses
+        if "p_home_win_from_goal_diff" in scored.columns and "p_home_win_from_margin" not in scored.columns:
+            scored["p_home_win_from_margin"] = scored["p_home_win_from_goal_diff"]
+
+        # -------------------------
+        # 7) Odds + edge + filter
+        # -------------------------
+        odds_df = self.odds.fetch_nhl_moneyline_odds(regions=self.regions, attach_game_id=True)
+        n_odds_rows = 0 if odds_df is None else len(odds_df)
+        print(f"[NHL BOT] odds rows={n_odds_rows}")
+
+        edges = add_edge_from_odds(
+            scored_games=scored,
+            odds_df=odds_df,
+            preferred_bookmaker=self.preferred_bookmaker,
+            market_blend_alpha=self.market_blend_alpha,
+            odds_history_df=None,  # 나중에 snapshot 저장 붙이면 넣자
+        )
+        n_edge_rows = 0 if edges is None or edges.empty else len(edges)
+        print(f"[NHL BOT] edge rows={n_edge_rows}")
+
+        bets = filter_bets(edges, min_edge=self.min_edge, use_strategy_config=True)
+        n_bets = 0 if bets is None or bets.empty else len(bets)
+        print(f"[NHL BOT] bets rows={n_bets}")
+
+        # -------------------------
+        # 8) Email
+        # -------------------------
+        if send_email:
+            try:
+                # 추천: email_management.py가 sports/date/df를 받도록 설계했을 가능성
+                send_daily_eval_report(
+                    sports="NHL",
+                    date=str(today),
+                    bets_df=bets,
+                    all_edges_df=edges,
+                    extra_text=None,
+                )
+            except TypeError:
+                # 기존 시그니처 방어: (bets_df, edges_df)만 받는 형태면 여기로
+                send_daily_eval_report(bets, edges)
+
+        return NHLRunResult(
+            today=today,
+            n_games_today=n_games_today,
+            n_odds_rows=n_odds_rows,
+            n_scored_rows=len(scored),
+            n_edge_rows=n_edge_rows,
+            n_bets=n_bets,
+        )
