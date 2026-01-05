@@ -47,7 +47,7 @@ class NHLStatsClient:
         params = params or {}
 
         for i in range(max_retries):
-            resp = requests.get(url, params=params, headers=headers, timeout=30)
+            resp = requests.get(url, params=params, headers=headers, timeout=90)
 
             if resp.status_code == 429:
                 retry_after = resp.headers.get("Retry-After")

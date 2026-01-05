@@ -69,7 +69,7 @@ class OddsAPIClient:
     def _get_bdl(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         url = f"{self.bdl_base}{path}"
         headers = {"Authorization": self.bdl_key, "Accept": "application/json"}
-        resp = requests.get(url, params=(params or {}), headers=headers, timeout=30)
+        resp = requests.get(url, params=(params or {}), headers=headers, timeout=90)
         resp.raise_for_status()
         return resp.json()
 
