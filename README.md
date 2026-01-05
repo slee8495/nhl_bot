@@ -32,7 +32,7 @@ nba_bot 보다 1/10 으로 작게 들어가는게 목표인 봇. 왜냐면, 시�
 
 
 
-1.	nhl_feature_engineering.py ✅ (지금)
+
 2.	nhl_train_quant.py (train + save model)
 3.	nhl_quant_model.py (load model + predict)
 4.	nhl_edge.py (odds merge + implied prob + edge)
