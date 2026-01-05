@@ -10,8 +10,9 @@ from config import (
     ODDS_API_KEY,
     ODDS_API_BASE_URL,
     BALLDONTLIE_API_KEY,
-    BALLDONTLIE_BASE_URL,
+    NHL_BASE_URL,
 )
+from nhl_team_abbr import to_abbr as to_nhl_abbr
 
 
 def _norm_team_name(s: str) -> str:

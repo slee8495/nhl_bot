@@ -9,7 +9,7 @@ import time
 import requests
 import pandas as pd
 
-from config import BALLDONTLIE_API_KEY, BALLDONTLIE_BASE_URL
+from config import BALLDONTLIE_API_KEY, NHL_BASE_URL
 
 
 class NHLDataClient:
@@ -26,7 +26,7 @@ class NHLDataClient:
 
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
         self.api_key = api_key or BALLDONTLIE_API_KEY
-        self.base_url = (base_url or BALLDONTLIE_BASE_URL).rstrip("/")
+        self.base_url = (base_url or NHL_BASE_URL).rstrip("/")
         if not self.api_key:
             raise ValueError("BALLDONTLIE_API_KEY is missing. Set it in your .env.")
 
@@ -53,7 +53,7 @@ class NHLDataClient:
             else:
                 params["page"] = page
 
-            data = self._get("/v1/games", params=params)
+            data = self._get("/games", params=params)
             games = data.get("data", []) or []
             if not games:
                 break
@@ -189,7 +189,7 @@ class NHLDataClient:
                 else:
                     params["page"] = page
 
-                data = self._get("/v1/games", params=params)
+                data = self._get("/games", params=params)
                 games = data.get("data", []) or []
                 if not games:
                     break
@@ -236,7 +236,7 @@ class NHLDataClient:
             else:
                 params["page"] = page
 
-            data = self._get("/v1/games", params=params)
+            data = self._get("/games", params=params)
             games = data.get("data", []) or []
             if not games:
                 break
