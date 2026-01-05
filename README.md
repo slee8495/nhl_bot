@@ -33,20 +33,12 @@ nba_bot 보다 1/10 으로 작게 들어가는게 목표인 봇. 왜냐면, 시�
 
 
 
-	2.	nhl_quant_main.py
-
-	•	NHLQuantBot().run(today) 같은 엔트리포인트
-	•	GitHub Actions에서 이 파일만 실행하면 끝
-
 	3.	nhl_performance.py
 
 	•	bet log 저장/정산/ROI/월별/누적
 	•	strategy tuning이 읽을 nhl_bet_log.csv 포맷을 여기서 고정
 
-	4.	nhl_quant_main_next_day.py
 
-	•	“어제 픽 정산” + “오늘 픽 생성” 같이 묶고 싶으면 여기서
-	•	(혹은 performance를 separate cron으로 돌려도 됨)
 
 	5.	nhl_advanced_stats.py
 
