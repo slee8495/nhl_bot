@@ -1,43 +1,57 @@
-	1.	config.py
-	2.	nhl_bot.yml (스케줄/환경변수)
-	3.	email_management.py
-	4.	odds_client.py
-	5.	*_api_client.py
-	6.	*_data.py → *_features.py → *_feature_engineering.py
-	7.	*_edge.py
-	8.	*_quant_model.py / *_train_quant.py
-	9.	*_quant_main.py / *_quant_main_next_day.py
+# config.py
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
-----
+NBA_TOTAL_DAILY_RISK = 100
 
 
-nba_bot 의 엔진을 기반으로 nhl_bot 을 만들어 볼거야. 
 
-nba_bot 에는 다음과 같은 파일들이 있어. 
+# --- Paths ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+MODEL_DIR = os.path.join(BASE_DIR, "models")
 
-- nba_bot.yml
-- config.py
-- email_management.py
-- nba_advanced_stats.py
-- nba_api_client.py
-- nba_data.py
-- nba_edge.py
-- nba_feature_engineering.py
-- nba_features.py
-- nba_injury_lineup.py
-- nba_margin_model.py
-- nba_performance.py
-- nba_quant_bot.py
-- nba_quant_main_next_day.py
-- nba_quant_main.py
-- nba_quant_model.py
-- nba_strategy_tuning.py
-- nba_team_abbr.py
-- nba_train_quant.py
-- odds_client.py
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(MODEL_DIR, exist_ok=True)
 
-이 파일들을 먼저 nhl_bot 기준으로 하나하나 옮기고, 그다음으로 하나하나 봐 가면서 튜닝할거야. 
-내가 하나하나 파일을 주면, 너는 그걸 읽고, 일단 nhl_bot 기준으로 옮겨주면 되. 
-그리고 나서 나는 버그들과, 에러들과, 모델강화와, 훈련, 튜닝 등 차근차근 들어가 보자. 어때? 
+NBA_TRAIN_PATH = os.path.join(DATA_DIR, "nba_train.csv")
+NBA_TODAY_PATH = os.path.join(DATA_DIR, "nba_today.csv")
+NBA_MODEL_PATH = os.path.join(MODEL_DIR, "nba_xgb_win.pkl")
+NBA_MARGIN_MODEL_PATH = os.path.join(MODEL_DIR, "nba_xgb_margin.pkl")
+
+# --- Email ---
+EMAIL_HOST = os.getenv("EMAIL_HOST")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_TO = os.getenv("EMAIL_TO")
+
+# --- Sports / Odds API (예: The Odds API) ---
+ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
+ODDS_API_BASE_URL = os.getenv("ODDS_API_BASE_URL")
+
+# --- Stats API (예: balldontlie for NBA) ---
+BALLDONTLIE_API_KEY = os.getenv("BALLDONTLIE_API_KEY", "")
+BALLDONTLIE_BASE_URL = os.getenv("BALLDONTLIE_BASE_URL")
+NBA_BASE_URL = f"{BALLDONTLIE_BASE_URL}/nba/v1"
+
+
+
+
+
+def _get_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name, "")
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        # 로그 찍고 default 쓰고 싶으면 여기서 print 한 줄 추가해도 됨
+        return default
+
+
 
