@@ -229,8 +229,17 @@ def main():
     # =========================
     win_model = NHLQuantModel.load_from_disk()
     scored_games = win_model.predict_proba(today_df)
-    scored = attach_lineup_features(scored, today)
-    scored = adjust_prob_with_lineup(scored)
+    
+
+    # downstream merge 안정화
+    scored_games["date"] = slate_date_pt
+
+    # ✅ (5.1) Lineup/Injury features + prob adjust (DROP-IN)
+    try:
+        scored_games = attach_lineup_features(scored_games, today=slate_date_pt)
+        scored_games = adjust_prob_with_lineup(scored_games)
+    except Exception as e:
+        print(f"[NHL MAIN] lineup adjust skipped: {e}")
 
     # downstream merge 안정화
     scored_games["date"] = slate_date_pt

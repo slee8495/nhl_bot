@@ -12,7 +12,7 @@ nba_bot 보다 1/10 으로 작게 들어가는게 목표인 봇. 왜냐면, 시�
 - nba_bot.yml (nhl_bot.yml)
 - config.py (config.py)
 - email_management.py (email_management.py)
-- nba_advanced_stats.py ()
+- nba_advanced_stats.py (nhl_advanced_stats.py)
 - nba_api_client.py (nhl_api_client.py)
 - nba_data.py (nhl_data.py)
 - nba_edge.py (nhl_edge.py)
@@ -31,5 +31,3 @@ nba_bot 보다 1/10 으로 작게 들어가는게 목표인 봇. 왜냐면, 시�
 - odds_client.py (odds_client.py)
 
 
-
-- nba_advanced_stats.py ()  -> 이거 우리 다 balldontlie 에서 가져올 수 있는거 아니야? nhl 은 뭐가 달라? 

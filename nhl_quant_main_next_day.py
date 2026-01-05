@@ -192,8 +192,14 @@ def main():
     scored_games = win_model.predict_proba(today_df)
     scored_games["date"] = slate_date_pt
 
-    scored = attach_lineup_features(scored, today)
-    scored = adjust_prob_with_lineup(scored)
+    # ✅ (5.1) Lineup/Injury features + prob adjust (DROP-IN)
+    try:    
+        scored_games = attach_lineup_features(scored_games, today=slate_date_pt)
+        scored_games = adjust_prob_with_lineup(scored_games)
+    except Exception as e:
+        print(f"[NHL NEXT] lineup adjust skipped: {e}")
+
+
 
 
     try:
