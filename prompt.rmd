@@ -1,3 +1,174 @@
+*** a/nhl_api_client.py
+--- b/nhl_api_client.py
+@@
+ from __future__ import annotations
+ 
+ from typing import List, Dict, Any, Optional, Union
+ from datetime import date, datetime
+ import time
+ 
+ import requests
+ import pandas as pd
+ 
+-from config import BALLDONTLIE_API_KEY, BALLDONTLIE_BASE_URL
++from config import BALLDONTLIE_API_KEY, NHL_BASE_URL
+ 
+ 
+ class NHLDataClient:
+@@
+     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
+         self.api_key = api_key or BALLDONTLIE_API_KEY
+-        self.base_url = (base_url or BALLDONTLIE_BASE_URL).rstrip("/")
++        # ✅ Use league-specific base URL by default
++        self.base_url = (base_url or NHL_BASE_URL).rstrip("/")
+         if not self.api_key:
+             raise ValueError("BALLDONTLIE_API_KEY is missing. Set it in your .env.")
+@@
+     def fetch_games_by_date_range_df(
+@@
+         while True:
+             params = {"start_date": start_str, "end_date": end_str, "per_page": per_page}
+             if cursor is not None:
+                 params["cursor"] = cursor
+             else:
+                 params["page"] = page
+ 
+-            data = self._get("/v1/games", params=params)
++            data = self._get("/games", params=params)
+             games = data.get("data", []) or []
+             if not games:
+                 break
+@@
+     def fetch_games_by_season(self, seasons: List[int], per_page: int = 100) -> pd.DataFrame:
+@@
+                 if cursor is not None:
+                     params["cursor"] = cursor
+                 else:
+                     params["page"] = page
+ 
+-                data = self._get("/v1/games", params=params)
++                data = self._get("/games", params=params)
+                 games = data.get("data", []) or []
+                 if not games:
+                     break
+@@
+     def fetch_games_by_date(self, d, per_page: int = 100) -> List[Dict[str, Any]]:
+@@
+         while True:
+             params = {"dates[]": d_str, "per_page": per_page}
+             if cursor is not None:
+                 params["cursor"] = cursor
+             else:
+                 params["page"] = page
+ 
+-            data = self._get("/v1/games", params=params)
++            data = self._get("/games", params=params)
+             games = data.get("data", []) or []
+             if not games:
+                 break
+
+
+
+----
+
+
+
+*** a/odds_client.py
+--- b/odds_client.py
+@@
+ from __future__ import annotations
+ from typing import Dict, Any, Optional
+ import re
+ import requests
+ import pandas as pd
+ 
+ from config import (
+     ODDS_API_KEY,
+     ODDS_API_BASE_URL,
+     BALLDONTLIE_API_KEY,
+-    BALLDONTLIE_BASE_URL,
++    NHL_BASE_URL,
+ )
+ 
++from nhl_team_abbr import to_abbr as to_nhl_abbr
++
+@@
+ class OddsAPIClient:
+@@
+     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
+         self.api_key = api_key or ODDS_API_KEY
+         self.base_url = (base_url or ODDS_API_BASE_URL).rstrip("/")
+         if not self.api_key:
+             raise ValueError("ODDS_API_KEY is missing. Set it in your .env.")
+ 
+         # balldontlie (팀/경기 매핑용)
+         self.bdl_key = BALLDONTLIE_API_KEY
+-        self.bdl_base = (BALLDONTLIE_BASE_URL or "").rstrip("/")
++        # ✅ NHL-specific base URL (important)
++        self.bdl_base = (NHL_BASE_URL or "").rstrip("/")
+         if not self.bdl_key or not self.bdl_base:
+             raise ValueError("BALLDONTLIE_API_KEY / BALLDONTLIE_BASE_URL missing (needed for team mapping).")
+@@
+     def _build_team_map(self) -> Dict[str, str]:
+@@
+-        data = self._get_bdl("/v1/teams", params={"per_page": 200})
++        data = self._get_bdl("/teams", params={"per_page": 200})
+         teams = data.get("data", []) or []
+@@
+     def _to_abbr(self, team_name: str) -> str:
+@@
+         m = self._build_team_map()
+         key = _norm_team_name(team_name)
+         abbr = m.get(key)
+         if abbr:
+             return abbr
+-        raise KeyError(f"[ODDS TEAM MAP FAIL] Unknown team name: '{team_name}' (norm='{key}')")
++        # ✅ fallback: robust alias map (Utah Mammoth rename defense etc.)
++        fb = to_nhl_abbr(team_name)
++        if fb:
++            return fb
++        raise KeyError(f"[ODDS TEAM MAP FAIL] Unknown team name: '{team_name}' (norm='{key}')")
+@@
+     def _fetch_bdl_games_by_dates(self, dates: list[str], league: str) -> pd.DataFrame:
+@@
+         all_rows = []
+         for d in sorted(set(dates)):
+-            data = self._get_bdl("/v1/games", params={"dates[]": d, "per_page": 200})
++            data = self._get_bdl("/games", params={"dates[]": d, "per_page": 200})
+             games = data.get("data", []) or []
+@@
+                 home = (g.get("home_team") or {})
+                 away = (g.get("away_team") or g.get("visitor_team") or {})
+ 
+                 all_rows.append(
+                     {
+                         "game_id": g.get("id"),
+                         "date": d,
+                         "home_team_abbr": (home.get("abbreviation") or "").upper(),
+                         "away_team_abbr": (away.get("abbreviation") or "").upper(),
+                     }
+                 )
+
+
+
+-----
+
+*** a/nhl_team_abbr.py
+--- b/nhl_team_abbr.py
+@@
+ ALIASES = {
+@@
++    # --- UTA (Utah Mammoth rename defense) ---
++    # If provider sends "Utah Mammoth" / "Mammoth" etc.
++    "UTAH":"UTA",
++    "UTAH MAMMOTH":"UTA",
++    "MAMMOTH":"UTA",
+ }
+
+
+
+----
+
 
 # nhl_api_client.py 상단 import 수정
 from config import BALLDONTLIE_API_KEY, NHL_BASE_URL
