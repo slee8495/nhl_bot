@@ -12,19 +12,20 @@ from config import (
     BALLDONTLIE_API_KEY,
     NHL_BASE_URL,
 )
+
 from nhl_team_abbr import to_abbr as to_nhl_abbr
 
 
 def _norm_team_name(s: str) -> str:
     """
-    팀명 문자열 정규화 (Odds API / balldontlie 간 표기 차이 흡수)
+    Team name normalization for mapping across providers.
     """
     s = (s or "").lower().strip()
     s = s.replace(".", " ")
     s = re.sub(r"[-_/]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
 
-    # 흔한 별칭 처리
+    # common city shortening patterns (harmless)
     s = s.replace("l a ", "la ")
     s = s.replace("los angeles", "la")
     s = s.replace("new york", "ny")
@@ -34,8 +35,8 @@ def _norm_team_name(s: str) -> str:
 
 class OddsAPIClient:
     """
-    The Odds API 래퍼 (NHL moneyline odds)
-    + balldontlie teams를 이용해 team_abbr 매핑까지 생성
+    The Odds API wrapper (NHL moneyline odds)
+    + balldontlie NHL teams/games used for team_abbr map and attach game_id.
     """
 
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
@@ -44,11 +45,10 @@ class OddsAPIClient:
         if not self.api_key:
             raise ValueError("ODDS_API_KEY is missing. Set it in your .env.")
 
-        # balldontlie (팀/경기 매핑용)
         self.bdl_key = BALLDONTLIE_API_KEY
-        self.bdl_base = (BALLDONTLIE_BASE_URL or "").rstrip("/")
+        self.bdl_base = (NHL_BASE_URL or "").rstrip("/")
         if not self.bdl_key or not self.bdl_base:
-            raise ValueError("BALLDONTLIE_API_KEY / BALLDONTLIE_BASE_URL missing (needed for team mapping).")
+            raise ValueError("BALLDONTLIE_API_KEY / NHL_BASE_URL missing (needed for team mapping).")
 
         self._team_map_norm_to_abbr: Optional[Dict[str, str]] = None
 
@@ -64,7 +64,7 @@ class OddsAPIClient:
         return resp.json()
 
     # -------------------------
-    # balldontlie
+    # balldontlie NHL
     # -------------------------
     def _get_bdl(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         url = f"{self.bdl_base}{path}"
@@ -75,13 +75,13 @@ class OddsAPIClient:
 
     def _build_team_map(self) -> Dict[str, str]:
         """
-        returns: { normalized_team_name: "BOS" } 같은 형태
-        NOTE: NHL에서도 /v1/teams 가 동일 구조로 내려온다는 전제 (balldontlie 공용)
+        returns: { normalized_team_name: "BOS" }
+        from balldontlie NHL /teams
         """
         if self._team_map_norm_to_abbr is not None:
             return self._team_map_norm_to_abbr
 
-        data = self._get_bdl("/v1/teams", params={"per_page": 200})
+        data = self._get_bdl("/teams", params={"per_page": 300})
         teams = data.get("data", []) or []
 
         m: Dict[str, str] = {}
@@ -99,20 +99,25 @@ class OddsAPIClient:
                 if nickname:
                     m[_norm_team_name(f"{city} {nickname}")] = abbr
 
-        # ✅ NBA에 있던 LA/NY 하드코딩은 NHL엔 불필요 (유지하면 오염될 수 있음)
         self._team_map_norm_to_abbr = m
         return m
 
     def _to_abbr(self, team_name: str) -> str:
         """
-        Odds API 팀명 -> ABBR
-        매칭 실패하면 바로 에러로 터뜨려서 '조용히 누락'되는 상황을 방지
+        Odds API team string -> ABBR
+        - strict: raise if cannot map
+        - includes fallback to nhl_team_abbr aliases (Utah Mammoth defense)
         """
         m = self._build_team_map()
         key = _norm_team_name(team_name)
         abbr = m.get(key)
         if abbr:
             return abbr
+
+        fb = to_nhl_abbr(team_name)
+        if fb:
+            return fb
+
         raise KeyError(f"[ODDS TEAM MAP FAIL] Unknown team name: '{team_name}' (norm='{key}')")
 
     # -------------------------
@@ -120,9 +125,9 @@ class OddsAPIClient:
     # -------------------------
     def fetch_nhl_moneyline_odds(self, regions: str = "us", attach_game_id: bool = True) -> pd.DataFrame:
         """
-        NHL moneyline odds 가져오기 (The Odds API)
+        Fetch NHL moneyline odds from The Odds API
         - sport key: icehockey_nhl
-        - markets: h2h (moneyline)
+        - markets: h2h
         """
         data = self._get_odds(
             "/sports/icehockey_nhl/odds",
@@ -136,16 +141,19 @@ class OddsAPIClient:
 
         rows = []
         for event in data:
-            event_id = event["id"]
-            home_team = event["home_team"]
-            away_team = event["away_team"]
-            start_time = event.get("commence_time")  # ISO string
+            event_id = event.get("id")
+            home_team = event.get("home_team")
+            away_team = event.get("away_team")
+            start_time = event.get("commence_time")  # ISO
+
+            if not event_id or not home_team or not away_team:
+                continue
 
             home_abbr = self._to_abbr(home_team)
             away_abbr = self._to_abbr(away_team)
 
             for bk in event.get("bookmakers", []):
-                bookmaker = bk.get("title")
+                bookmaker = bk.get("title", "")
                 for mkt in bk.get("markets", []):
                     if mkt.get("key") != "h2h":
                         continue
@@ -179,12 +187,12 @@ class OddsAPIClient:
         df["start_time"] = pd.to_datetime(df["start_time"], utc=True, errors="coerce")
 
         if attach_game_id:
-            df = self._attach_game_id(df, league="nhl")
+            df = self._attach_game_id(df)
 
         return df
 
     # -------------------------
-    # attach game_id via balldontlie games
+    # attach game_id via balldontlie NHL /games
     # -------------------------
     def _commence_to_utc_date_str(self, commence_time) -> str:
         if commence_time is None or (isinstance(commence_time, float) and pd.isna(commence_time)):
@@ -192,24 +200,16 @@ class OddsAPIClient:
         dt = pd.to_datetime(commence_time, utc=True, errors="raise")
         return dt.date().isoformat()
 
-    def _fetch_bdl_games_by_dates(self, dates: list[str], league: str) -> pd.DataFrame:
+    def _fetch_bdl_games_by_dates(self, dates: list[str]) -> pd.DataFrame:
         """
-        balldontlie games를 날짜 리스트로 가져와서 DataFrame 반환
-
-        league:
-          - "nba" or "nhl"
+        balldontlie NHL games by dates[] list
         """
         all_rows = []
         for d in sorted(set(dates)):
-            # balldontlie: /v1/games?dates[]=YYYY-MM-DD&per_page=100
-            # NOTE: NHL에서도 동일 경로라고 가정. 만약 리그별 prefix가 필요하면 여기서만 수정하면 됨.
-            data = self._get_bdl("/v1/games", params={"dates[]": d, "per_page": 200})
+            data = self._get_bdl("/games", params={"dates[]": d, "per_page": 300})
             games = data.get("data", []) or []
 
             for g in games:
-                # --- NHL/NBA 구조 차이 방어 ---
-                # NBA: home_team / visitor_team
-                # NHL: home_team / away_team (가능성 높음)
                 home = (g.get("home_team") or {})
                 away = (g.get("away_team") or g.get("visitor_team") or {})
 
@@ -228,12 +228,12 @@ class OddsAPIClient:
             out["away_team_abbr"] = out["away_team_abbr"].astype(str).str.upper()
         return out
 
-    def _attach_game_id(self, odds_rows: pd.DataFrame, league: str = "nhl") -> pd.DataFrame:
+    def _attach_game_id(self, odds_rows: pd.DataFrame) -> pd.DataFrame:
         """
-        odds_rows (event_id 단위) -> balldontlie 기준 game_id 매핑
-        매핑 우선순위:
-          1) (date_utc, home_abbr, away_abbr)
-          2) (date_utc +/- 1일, home_abbr, away_abbr)  # 날짜 경계/타임존 방어
+        Map Odds API rows -> balldontlie game_id
+        Priority:
+          1) exact match on (date_utc, home_abbr, away_abbr)
+          2) fallback: +/- 1 day (timezone boundary defense)
         """
         df = odds_rows.copy()
         if df.empty:
@@ -252,7 +252,7 @@ class OddsAPIClient:
             dates_plus.add((dt - pd.Timedelta(days=1)).date().isoformat())
             dates_plus.add((dt + pd.Timedelta(days=1)).date().isoformat())
 
-        bdl_games = self._fetch_bdl_games_by_dates(sorted(dates_plus), league=league)
+        bdl_games = self._fetch_bdl_games_by_dates(sorted(dates_plus))
         if bdl_games.empty:
             df["game_id"] = None
             print("[DEBUG][ODDS][BDL_GAMES] empty - cannot attach game_id")
@@ -272,14 +272,16 @@ class OddsAPIClient:
         if miss.any():
             tmp = df.loc[miss, key_cols].copy()
             tmp["date_dt"] = pd.to_datetime(tmp["date_utc"])
+
             candidates = []
             for shift in (-1, 1):
                 t2 = tmp.copy()
                 t2["date_utc"] = (t2["date_dt"] + pd.Timedelta(days=shift)).dt.date.astype(str)
                 candidates.append(t2[key_cols])
-            retry_keys = pd.concat(candidates, ignore_index=True).drop_duplicates()
 
+            retry_keys = pd.concat(candidates, ignore_index=True).drop_duplicates()
             retry = retry_keys.merge(bdl_map, how="left", on=key_cols).dropna(subset=["game_id"])
+
             if not retry.empty:
                 retry["k"] = retry["date_utc"] + "|" + retry["home_team_abbr"] + "|" + retry["away_team_abbr"]
                 retry_map = dict(zip(retry["k"], retry["game_id"]))
