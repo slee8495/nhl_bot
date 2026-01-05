@@ -1,127 +1,201 @@
+name: NBA Quant Bot
 
-# config.py (NHL Bot)
+on:
+  schedule:
+    # =========================
+    # ✅ Daily run @ 9:00 PM PT (PST)
+    # -------------------------
+    # 09:00 PT (PST, UTC-8) = 09:00 UTC
+    - cron: "0 5 * * *"
+    # =========================
 
-import os
-from dotenv import load_dotenv
+    # =========================
+    # ✅ Annual retrain (Aug 1)
+    # -------------------------
+    # Aug is typically PDT (UTC-7): 06:00 PT = 13:00 UTC
+    - cron: "0 13 1 8 *"
+    # =========================
 
-load_dotenv()
+    # ======================================================
+    # Hourly options (PT) — uncomment ONLY the cron line you want
+    # Note: GitHub Actions cron is UTC
+    # ------------------------------------------------------
+    # ---- PST (UTC-8) : 09:00–20:00 PT => 17:00–04:00 UTC ----
+    # 9 AM  (PST) = 17:00 UTC
+    # - cron: "0 17 * * *"
 
-# =========================
-# Risk / Bankroll
-# =========================
-NHL_TOTAL_DAILY_RISK = 100
+    # 10 AM (PST) = 18:00 UTC
+    # - cron: "0 18 * * *"
 
+    # 11 AM (PST) = 19:00 UTC
+    # - cron: "0 19 * * *"
 
-# =========================
-# Paths
-# =========================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
-MODEL_DIR = os.path.join(BASE_DIR, "models")
+    # 12 PM (PST) = 20:00 UTC
+    # - cron: "0 20 * * *"
 
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(MODEL_DIR, exist_ok=True)
+    # 1 PM  (PST) = 21:00 UTC
+    # - cron: "0 21 * * *"
 
-NHL_TRAIN_PATH = os.path.join(DATA_DIR, "nhl_train.csv")
-NHL_TODAY_PATH = os.path.join(DATA_DIR, "nhl_today.csv")
+    # 2 PM  (PST) = 22:00 UTC
+    - cron: "0 22 * * *"
 
-NHL_MODEL_PATH = os.path.join(MODEL_DIR, "nhl_xgb_win.pkl")
-NHL_MARGIN_MODEL_PATH = os.path.join(MODEL_DIR, "nhl_xgb_margin.pkl")
+    # 3 PM  (PST) = 23:00 UTC
+    - cron: "0 23 * * *"
 
+    # 4 PM  (PST) = 00:00 UTC (next day)
+    # - cron: "0 0 * * *"
 
-# =========================
-# Email
-# =========================
-EMAIL_HOST = os.getenv("EMAIL_HOST")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
-EMAIL_USER = os.getenv("EMAIL_USER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_TO = os.getenv("EMAIL_TO")
+    # 5 PM  (PST) = 01:00 UTC (next day)
+    - cron: "0 1 * * *"
 
+    # 6 PM  (PST) = 02:00 UTC (next day)
+    # - cron: "0 2 * * *"
 
-# =========================
-# Odds API
-# =========================
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
-ODDS_API_BASE_URL = os.getenv("ODDS_API_BASE_URL")
+    # 7 PM  (PST) = 03:00 UTC (next day)
+    # - cron: "0 3 * * *"
 
+    # 8 PM  (PST) = 04:00 UTC (next day)
+    # - cron: "0 4 * * *"
+    # ======================================================
 
-# =========================
-# balldontlie API (NBA / NHL 공용)
-# =========================
-BALLDONTLIE_API_KEY = os.getenv("BALLDONTLIE_API_KEY", "")
-BALLDONTLIE_BASE_URL = os.getenv("BALLDONTLIE_BASE_URL")
+  workflow_dispatch:
+    inputs:
+      run_mode:
+        description: "Select which script to run"
+        required: true
+        default: "normal"
+        type: choice
+        options:
+          - normal
+          - next_day
 
-NBA_BASE_URL = f"{BALLDONTLIE_BASE_URL}/nba/v1"
-NHL_BASE_URL = f"{BALLDONTLIE_BASE_URL}/nhl/v1"
+permissions:
+  contents: write
 
+jobs:
+  nba-quant:
+    runs-on: ubuntu-latest
 
-def _get_float_env(name: str, default: float) -> float:
-    raw = os.getenv(name, "")
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
----
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev
 
-# config.py
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography
+          pip install -r requirements.txt
 
-import os
-from dotenv import load_dotenv
+      # ✅ Ensure folders exist + keep them visible in GitHub (empty folder issue)
+      - name: Ensure data/models dirs exist
+        run: |
+          mkdir -p data models
+          test -f models/.gitkeep || echo "" > models/.gitkeep
+          test -f data/.gitkeep || echo "" > data/.gitkeep
 
-load_dotenv()
+      # ✅ Detect annual retrain run (Aug 1 cron)
+      - name: Detect annual retrain run
+        id: retrain_flag
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "0 13 1 8 *" ]; then
+            echo "is_retrain=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_retrain=false" >> $GITHUB_OUTPUT
+          fi
 
+      # ✅ Detect next-day script usage:
+      # - scheduled 1:00 AM PT (0 9 * * *) => next_day
+      # - manual run: depends on inputs.run_mode
+      - name: Detect next-day run (schedule or manual)
+        id: nextday_flag
+        run: |
+          # Manual run: use input selection
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.run_mode }}" = "next_day" ]; then
+              echo "use_nextday=true" >> $GITHUB_OUTPUT
+            else
+              echo "use_nextday=false" >> $GITHUB_OUTPUT
+            fi
+            exit 0
+          fi
 
-NBA_TOTAL_DAILY_RISK = 100
+          # Scheduled run: 9:00 PM PT (PST) = 05:00 UTC => "0 5 * * *"
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "0 5 * * *" ]; then
+            echo "use_nextday=true" >> $GITHUB_OUTPUT
+          else
+            echo "use_nextday=false" >> $GITHUB_OUTPUT
+          fi
 
+      # ✅ Check if PKLs exist (MUST match config.py paths)
+      - name: Check if model PKLs exist
+        id: model_check
+        run: |
+          WIN_PKL="models/nba_xgb_win.pkl"
+          MARGIN_PKL="models/nba_xgb_margin.pkl"
 
+          if [ -f "$WIN_PKL" ] && [ -f "$MARGIN_PKL" ]; then
+            echo "need_train=false" >> $GITHUB_OUTPUT
+            echo "PKLs found. Will reuse."
+          else
+            echo "need_train=true" >> $GITHUB_OUTPUT
+            echo "PKLs missing. Will train and commit."
+          fi
 
-# --- Paths ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
-MODEL_DIR = os.path.join(BASE_DIR, "models")
+      # ✅ Train if missing OR annual retrain day
+      - name: Train NBA Model (only when missing or annual retrain)
+        if: steps.model_check.outputs.need_train == 'true' || steps.retrain_flag.outputs.is_retrain == 'true'
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+          BALLDONTLIE_BASE_URL: ${{ secrets.BALLDONTLIE_BASE_URL }}
+        run: |
+          python nba_train_quant.py
 
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(MODEL_DIR, exist_ok=True)
+      # ✅ Commit & push PKLs (+ .gitkeep) if training ran
+      - name: Commit & push updated PKLs (and keep files)
+        if: steps.model_check.outputs.need_train == 'true' || steps.retrain_flag.outputs.is_retrain == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-NBA_TRAIN_PATH = os.path.join(DATA_DIR, "nba_train.csv")
-NBA_TODAY_PATH = os.path.join(DATA_DIR, "nba_today.csv")
-NBA_MODEL_PATH = os.path.join(MODEL_DIR, "nba_xgb_win.pkl")
-NBA_MARGIN_MODEL_PATH = os.path.join(MODEL_DIR, "nba_xgb_margin.pkl")
+          git add models/nba_xgb_win.pkl models/nba_xgb_margin.pkl models/.gitkeep data/.gitkeep || true
+          git status
 
-# --- Email ---
-EMAIL_HOST = os.getenv("EMAIL_HOST")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
-EMAIL_USER = os.getenv("EMAIL_USER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_TO = os.getenv("EMAIL_TO")
+          git diff --cached --quiet && echo "No model changes to commit." && exit 0
 
-# --- Sports / Odds API (예: The Odds API) ---
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
-ODDS_API_BASE_URL = os.getenv("ODDS_API_BASE_URL")
+          git commit -m "Update NBA model PKLs (auto)"
+          git push
 
-# --- Stats API (예: balldontlie for NBA) ---
-BALLDONTLIE_API_KEY = os.getenv("BALLDONTLIE_API_KEY", "")
-BALLDONTLIE_BASE_URL = os.getenv("BALLDONTLIE_BASE_URL")
-NBA_BASE_URL = f"{BALLDONTLIE_BASE_URL}/nba/v1"
+      # ✅ Run bot (daily + retrain day)
+      - name: Run NBA Quant Bot
+        env:
+          EMAIL_HOST: ${{ secrets.EMAIL_HOST }}
+          EMAIL_PORT: ${{ secrets.EMAIL_PORT }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
 
-
-
-
-
-def _get_float_env(name: str, default: float) -> float:
-    raw = os.getenv(name, "")
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        # 로그 찍고 default 쓰고 싶으면 여기서 print 한 줄 추가해도 됨
-        return default
-
-
-
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+          BALLDONTLIE_BASE_URL: ${{ secrets.BALLDONTLIE_BASE_URL }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          ODDS_API_BASE_URL: ${{ secrets.ODDS_API_BASE_URL }}
+        run: |
+          if [ "${{ steps.nextday_flag.outputs.use_nextday }}" = "true" ]; then
+            echo "[RUN] Using next-day script: nba_quant_main_next_day.py"
+            python nba_quant_main_next_day.py
+          else
+            echo "[RUN] Using normal script: nba_quant_main.py"
+            python nba_quant_main.py
+          fi
