@@ -1,3 +1,16 @@
+	1.	config.py
+	2.	nhl_bot.yml (스케줄/환경변수)
+	3.	email_management.py
+	4.	odds_client.py
+	5.	*_api_client.py
+	6.	*_data.py → *_features.py → *_feature_engineering.py
+	7.	*_edge.py
+	8.	*_quant_model.py / *_train_quant.py
+	9.	*_quant_main.py / *_quant_main_next_day.py
+
+
+----
+
 
 nba_bot 의 엔진을 기반으로 nhl_bot 을 만들어 볼거야. 
 
