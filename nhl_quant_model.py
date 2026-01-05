@@ -1,0 +1,270 @@
+# nhl_quant_model.py
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List
+
+import joblib
+import numpy as np
+import pandas as pd
+from xgboost import XGBClassifier
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
+
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
+
+from config import NHL_MODEL_PATH
+
+
+@dataclass
+class NHLEvalResult:
+    n_games: int
+    mean_auc: float
+    mean_logloss: float
+    mean_brier: float
+    half_life_days: float | None = None
+
+
+class NHLQuantModel:
+    """
+    - game-level feature → home win prob
+
+    NBA 버전과 동일 철학:
+      1) half-life 제거(호환 파라미터만 유지)
+      2) 최신 시즌만 'season_games' 기반 신뢰도 가중치(1.0~1.2)
+      3) OOF 기반 Calibration(iso/platt) 저장 + predict에 적용
+      4) eval_mode: holdout(운영 추천) or tscv
+    """
+
+    def __init__(self):
+        self.model: XGBClassifier | None = None
+        self.feature_cols: List[str] = []
+        self.calibrator = None  # IsotonicRegression or LogisticRegression
+
+    # -----------------------------
+    # Weighting by season games
+    # -----------------------------
+    @staticmethod
+    def _season_reliability_weight(season_games_min) -> float:
+        try:
+            g = float(season_games_min)
+        except Exception:
+            return 1.0
+
+        if g < 15:
+            return 1.00
+        if g < 30:
+            return 1.10
+        return 1.20
+
+    @staticmethod
+    def _compute_sample_weights_by_season_games(df: pd.DataFrame) -> np.ndarray:
+        if df.empty or "season" not in df.columns:
+            return np.ones(len(df), dtype=float)
+
+        current_season = int(pd.to_numeric(df["season"], errors="coerce").max())
+        s = pd.to_numeric(df["season"], errors="coerce").fillna(current_season).astype(int)
+
+        # season_games 없으면 전부 1
+        if ("season_games_home" not in df.columns) or ("season_games_away" not in df.columns):
+            return np.ones(len(df), dtype=float)
+
+        g_home = pd.to_numeric(df["season_games_home"], errors="coerce").fillna(0).values
+        g_away = pd.to_numeric(df["season_games_away"], errors="coerce").fillna(0).values
+        g_min = np.minimum(g_home, g_away)
+
+        w = np.ones(len(df), dtype=float)
+        is_current = (s.values == current_season)
+        idxs = np.where(is_current)[0]
+        for i in idxs:
+            w[i] = NHLQuantModel._season_reliability_weight(g_min[i])
+        return w
+
+    # -----------------------------
+    # Train
+    # -----------------------------
+    def train_walkforward(
+        self,
+        df_train: pd.DataFrame,
+        feature_cols: List[str],
+        n_splits: int = 5,
+        random_state: int = 42,
+        half_life_days: float | None = None,  # 호환용(안 씀)
+        save: bool = True,
+        eval_mode: str = "holdout",           # "holdout" or "tscv"
+        holdout_frac: float = 0.20,           # 최근 20%
+        min_holdout_rows: int = 200,          # 너무 작으면 tscv로 fallback
+    ) -> NHLEvalResult:
+        df = df_train.sort_values("date").reset_index(drop=True).copy()
+        df["date"] = pd.to_datetime(df["date"])
+
+        if "target" not in df.columns:
+            raise ValueError("[NHLQuantModel] df_train must contain 'target'.")
+
+        # robust numeric
+        X = df[feature_cols].apply(pd.to_numeric, errors="coerce").values
+        y = df["target"].astype(int).values
+
+        # 최신 시즌만 1.0~1.2
+        w_rows = self._compute_sample_weights_by_season_games(df)
+
+        def _fit_xgb(X_tr, y_tr, w_tr):
+            m = XGBClassifier(
+                n_estimators=400,
+                max_depth=4,
+                learning_rate=0.05,
+                subsample=0.9,
+                colsample_bytree=0.9,
+                eval_metric="logloss",
+                random_state=random_state,
+                n_jobs=-1,
+            )
+            m.fit(X_tr, y_tr, sample_weight=w_tr)
+            return m
+
+        # ----------------------------
+        # (A) HOLDOUT (운영 추천)
+        # ----------------------------
+        use_holdout = (eval_mode.lower() == "holdout")
+        n = len(df)
+        n_hold = int(np.floor(n * float(holdout_frac)))
+        if n_hold < int(min_holdout_rows):
+            use_holdout = False
+
+        preds_oof = np.full(n, np.nan, dtype=float)
+
+        if use_holdout:
+            split = n - n_hold
+            tr_idx = np.arange(0, split)
+            va_idx = np.arange(split, n)
+
+            X_tr, y_tr = X[tr_idx], y[tr_idx]
+            X_va, y_va = X[va_idx], y[va_idx]
+            w_tr = w_rows[tr_idx]
+
+            model = _fit_xgb(X_tr, y_tr, w_tr)
+            p_va = model.predict_proba(X_va)[:, 1].astype(float)
+            preds_oof[va_idx] = p_va
+
+            auc = roc_auc_score(y_va, p_va)
+            ll = log_loss(y_va, p_va)
+            br = brier_score_loss(y_va, p_va)
+            print(f"[NHL WIN HOLDOUT] last {int(holdout_frac*100)}%: AUC={auc:.4f}, LogLoss={ll:.4f}, Brier={br:.4f}")
+
+            mean_auc, mean_ll, mean_br = float(auc), float(ll), float(br)
+
+        # ----------------------------
+        # (B) TimeSeriesSplit (기존 방식)
+        # ----------------------------
+        else:
+            tscv = TimeSeriesSplit(n_splits=n_splits)
+            aucs, loglosses, briers = [], [], []
+
+            for fold, (tr_idx, val_idx) in enumerate(tscv.split(X, y), start=1):
+                X_tr, X_val = X[tr_idx], X[val_idx]
+                y_tr, y_val = y[tr_idx], y[val_idx]
+                w_tr = w_rows[tr_idx]
+
+                model = _fit_xgb(X_tr, y_tr, w_tr)
+
+                p_val = model.predict_proba(X_val)[:, 1].astype(float)
+                preds_oof[val_idx] = p_val
+
+                auc = roc_auc_score(y_val, p_val)
+                ll = log_loss(y_val, p_val)
+                br = brier_score_loss(y_val, p_val)
+
+                aucs.append(auc)
+                loglosses.append(ll)
+                briers.append(br)
+                print(f"[NHL WIN WF] Fold {fold}: AUC={auc:.4f}, LogLoss={ll:.4f}, Brier={br:.4f}")
+
+            mean_auc = float(np.mean(aucs)) if aucs else np.nan
+            mean_ll = float(np.mean(loglosses)) if loglosses else np.nan
+            mean_br = float(np.mean(briers)) if briers else np.nan
+            print(f"[NHL WIN WF] mean AUC={mean_auc:.4f}, mean LogLoss={mean_ll:.4f}, mean Brier={mean_br:.4f}")
+
+        # ----------------------------
+        # Calibration (OOF 기반)
+        # ----------------------------
+        cal = None
+        mask = ~np.isnan(preds_oof)
+        try:
+            if mask.sum() >= 200:
+                iso = IsotonicRegression(out_of_bounds="clip")
+                iso.fit(preds_oof[mask], y[mask])
+                cal = iso
+            else:
+                lr = LogisticRegression(solver="lbfgs")
+                lr.fit(preds_oof[mask].reshape(-1, 1), y[mask])
+                cal = lr
+        except Exception:
+            cal = None
+
+        # ----------------------------
+        # Final train (전체 데이터)
+        # ----------------------------
+        final_model = _fit_xgb(X, y, w_rows)
+
+        self.model = final_model
+        self.feature_cols = list(feature_cols)
+        self.calibrator = cal
+
+        if save:
+            joblib.dump(
+                {"model": self.model, "feature_cols": self.feature_cols, "calibrator": self.calibrator},
+                NHL_MODEL_PATH,
+            )
+            print(f"[NHLQuantModel] Final win model saved to {NHL_MODEL_PATH}")
+
+        return NHLEvalResult(
+            n_games=len(df),
+            mean_auc=mean_auc,
+            mean_logloss=mean_ll,
+            mean_brier=mean_br,
+            half_life_days=None,
+        )
+
+    # -----------------------------
+    # Predict
+    # -----------------------------
+    @staticmethod
+    def load_from_disk() -> "NHLQuantModel":
+        obj = joblib.load(NHL_MODEL_PATH)
+        m = NHLQuantModel()
+        m.model = obj["model"]
+        m.feature_cols = obj["feature_cols"]
+        m.calibrator = obj.get("calibrator", None)
+        return m
+
+    def predict_proba(self, df_today: pd.DataFrame) -> pd.DataFrame:
+        if self.model is None or not self.feature_cols:
+            raise ValueError("NHLQuantModel.predict_proba: model not loaded/trained.")
+
+        missing = [c for c in self.feature_cols if c not in df_today.columns]
+        if missing:
+            raise ValueError(f"[NHL WIN] Missing features in input: {missing}")
+
+        X = df_today[self.feature_cols].apply(pd.to_numeric, errors="coerce").values
+        proba = self.model.predict_proba(X)[:, 1].astype(float)
+
+        # calibration 적용
+        if self.calibrator is not None:
+            try:
+                cal = self.calibrator
+                if hasattr(cal, "predict") and not hasattr(cal, "predict_proba"):
+                    # isotonic
+                    proba = cal.predict(proba)
+                else:
+                    # platt logistic
+                    proba = cal.predict_proba(proba.reshape(-1, 1))[:, 1]
+            except Exception:
+                pass
+
+        proba = np.clip(proba, 0.01, 0.99)
+
+        out = df_today.copy()
+        out["p_home_win"] = proba
+        return out
