@@ -28,6 +28,7 @@ NHL_MODEL_PATH = os.path.join(MODEL_DIR, "nhl_xgb_win.pkl")
 NHL_MARGIN_MODEL_PATH = os.path.join(MODEL_DIR, "nhl_xgb_margin.pkl")
 
 
+
 # =========================
 # Email
 # =========================

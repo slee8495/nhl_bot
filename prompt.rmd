@@ -1,205 +1,4 @@
-
-
-NHL_TRAIN_PATH = os.path.join(DATA_DIR, "nhl_train.csv")
-NHL_TODAY_PATH = os.path.join(DATA_DIR, "nhl_today.csv")
-NHL_MODEL_PATH = os.path.join(MODEL_DIR, "nhl_xgb_win.pkl")
-NHL_MARGIN_MODEL_PATH = os.path.join(MODEL_DIR, "nhl_xgb_margin.pkl")  # 있으면
-NHL_TOTAL_DAILY_RISK = 100
-
----
-
-
-import pandas as pd
-from config import NHL_TRAIN_PATH, NHL_TODAY_PATH
-
-
-def load_training_data() -> pd.DataFrame:
-    """
-    nhl_train.csv 형식 (예시):
-      - game_id
-      - date
-      - season
-      - home_team
-      - away_team
-      - feature_1, feature_2, ..., feature_k
-      - target   # 1 = home 팀 승리, 0 = 패배
-
-    필수:
-      - 'target'
-    """
-    df = pd.read_csv(NHL_TRAIN_PATH)
-    if "target" not in df.columns:
-        raise ValueError("nhl_train.csv must contain a 'target' column.")
-    return df
-
-
-def load_today_games() -> pd.DataFrame:
-    """
-    nhl_today.csv 형식 (예시):
-
-      game_id
-      date
-      home_team
-      away_team
-
-      # model input features (훈련 때와 동일 스키마)
-      feature_1 ...
-      feature_k
-
-      # betting odds
-      side              'home' 또는 'away'
-      american_odds     예: -150, +120
-
-    최소 requirements:
-      - game_id
-    """
-    df = pd.read_csv(NHL_TODAY_PATH)
-    if "game_id" not in df.columns:
-        raise ValueError("nhl_today.csv must contain 'game_id'.")
-    return df
-
-
-----
-
-from __future__ import annotations
-import numpy as np
-import pandas as pd
-
-
-def build_training_df(raw_games: pd.DataFrame):
-    """
-    raw_games 예시 컬럼 구조:
-
-      - game_id
-      - date
-      - season
-      - home_team, away_team
-      - home_score, away_score
-
-      - home_xxx, away_xxx (예: elo, rest_days, rolling goals for/against 등)
-      - 기타 숫자형 피처들
-
-    output:
-      - df_model
-      - feature_cols
-    """
-    df = raw_games.copy()
-
-    # target: home win
-    if {"home_score", "away_score"}.issubset(df.columns):
-        df["target"] = (df["home_score"] > df["away_score"]).astype(int)
-    elif "target" in df.columns:
-        pass
-    else:
-        raise ValueError("raw_games must have either (home_score, away_score) or 'target'.")
-
-    # date normalize
-    if "date" in df.columns and not np.issubdtype(df["date"].dtype, np.datetime64):
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-
-    # numeric features
-    num_cols = df.select_dtypes(include=["number"]).columns.tolist()
-    drop_for_features = {
-        "game_id",
-        "season",
-        "home_score",
-        "away_score",
-        "target",
-    }
-    feature_cols = [c for c in num_cols if c not in drop_for_features]
-
-    keep_cols = ["game_id", "date", "season", "home_team", "away_team", "target"]
-    for c in keep_cols:
-        if c not in df.columns:
-            df[c] = np.nan  # upstream에서 채우는 게 베스트지만, 일단 안전하게
-
-    df_model = df[keep_cols + feature_cols].dropna(subset=feature_cols + ["target"])
-    return df_model, feature_cols
-
-
-def build_today_feature_df(today_games: pd.DataFrame, feature_cols: list[str]) -> pd.DataFrame:
-    """
-    오늘 경기(today_games)를 학습 feature_cols 기준으로 정리.
-    side == 'home' => model_p = p_home_win
-    side == 'away' => model_p = 1 - p_home_win
-    """
-    df = today_games.copy()
-    missing = [c for c in feature_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"build_today_feature_df: missing features {missing} in today_games")
-    return df
-
-
-----
-
-
-
-# nba_data.py
-
-import pandas as pd
-from typing import Tuple
-from config import NBA_TRAIN_PATH, NBA_TODAY_PATH
-
-
-def load_training_data() -> pd.DataFrame:
-    """
-    nba_train.csv 형식 (예시):
-      - game_id
-      - date
-      - season
-      - home_team
-      - away_team
-      - feature_1, feature_2, ..., feature_k
-      - target   # 1 = home 팀 승리, 0 = 패배 (또는 네가 정의한 label)
-
-    여기서는:
-      - 'target' 컬럼만 필수
-      - feature 컬럼은 숫자형이면 뭐든 상관 없음
-    """
-    df = pd.read_csv(NBA_TRAIN_PATH)
-    if "target" not in df.columns:
-        raise ValueError("nba_train.csv must contain a 'target' column.")
-    return df
-
-
-def load_today_games() -> pd.DataFrame:
-    """
-    nba_today.csv 형식 (예시):
-
-      game_id           고유 ID (문자열/숫자 아무거나)
-      date
-      home_team
-      away_team
-
-      # model input feature 들 (학습 때와 동일 구조)
-      feature_1
-      feature_2
-      ...
-      feature_k
-
-      # betting odds (미국식 오즈 또는 십진 오즈 중 하나)
-      side              'home' 또는 'away' (어느 쪽에 대한 odds 인지)
-      american_odds     예: -150, +120 ...
-      # 또는 decimal_odds   (둘 중 하나 쓰면 됨)
-
-    최소 requirements:
-      - game_id
-      - side
-      - target에 대응되는쪽 feature 세트 (여기서는 'home 승리 확률' 모델이므로
-        feature는 'home 관점'으로 정리되어 있는 걸로 가정)
-    """
-    df = pd.read_csv(NBA_TODAY_PATH)
-    if "game_id" not in df.columns:
-        raise ValueError("nba_today.csv must contain 'game_id'.")
-    return df
-
-
-
-
-===============
-
-
-# nba_features.py
+# nba_feature_engineering.py
 
 from __future__ import annotations
 from typing import Tuple
@@ -207,89 +6,1055 @@ from typing import Tuple
 import numpy as np
 import pandas as pd
 
+from datetime import date as _date
+from nba_advanced_stats import build_team_advanced_stats_panel
 
-def build_training_df(raw_games: pd.DataFrame) -> pd.DataFrame:
+from nba_team_abbr import to_abbr
+
+
+def _add_elo_to_games(
+    raw_games: pd.DataFrame,
+    base_rating: float = 1500.0,
+    k_factor: float = 20.0
+) -> pd.DataFrame:
     """
-    raw_games 예시 컬럼 구조 (너가 맞추면 됨):
-
-      - game_id
-      - date (datetime or string)
-      - season
-      - home_team, away_team
-      - home_score, away_score
-
-      - home_off_rt, away_off_rt, ...
-      - home_def_rt, away_def_rt, ...
-      - home_elo, away_elo, ...
-      - home_rest_days, away_rest_days
-      - etc...
-
-    여기서는:
-      - target: home 팀 승리 여부 (1 = home win, 0 = home loss)
-      - feature: 'home 관점'에서의 숫자형 피처들로 구성
-        (home_xxx - away_xxx, home_xxx, away_xxx 등 자유롭게 설계 가능)
+    각 게임별로 pre-game Elo rating (home/away)을 계산해서
+    'elo_home', 'elo_away' 컬럼을 추가한다.
     """
     df = raw_games.copy()
 
-    # 기본 target
-    if {"home_score", "away_score"}.issubset(df.columns):
-        df["target"] = (df["home_score"] > df["away_score"]).astype(int)
-    elif "target" in df.columns:
-        # 이미 target 이 있다면 그대로 사용
-        pass
-    else:
-        raise ValueError("raw_games must have either (home_score, away_score) or 'target'.")
+    # 날짜 정렬
+    if not np.issubdtype(df["date"].dtype, np.datetime64):
+        df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").reset_index(drop=True)
 
-    # 날짜 타입 정리
+    ratings: dict[str, float] = {}
+    elo_home_list = []
+    elo_away_list = []
+
+    for _, row in df.iterrows():
+        home = row["home_team"]
+        away = row["away_team"]
+
+        Rh = ratings.get(home, base_rating)
+        Ra = ratings.get(away, base_rating)
+
+        # pre-game Elo 기록
+        elo_home_list.append(Rh)
+        elo_away_list.append(Ra)
+
+        # ✅ 스코어 없는 경기면 Elo 업데이트는 하지 않는다
+        hs = row.get("home_score", np.nan)
+        aws = row.get("away_score", np.nan)
+        if pd.isna(hs) or pd.isna(aws):
+            continue
+
+        # 실제 결과 (home win = 1, home lose = 0)
+        if row["home_score"] > row["away_score"]:
+            Sh, Sa = 1.0, 0.0
+        elif row["home_score"] < row["away_score"]:
+            Sh, Sa = 0.0, 1.0
+        else:
+            Sh, Sa = 0.5, 0.5
+
+        # 기대 승률
+        Eh = 1.0 / (1.0 + 10.0 ** ((Ra - Rh) / 400.0))
+        Ea = 1.0 - Eh
+
+        # 업데이트
+        Rh_new = Rh + k_factor * (Sh - Eh)
+        Ra_new = Ra + k_factor * (Sa - Ea)
+
+        ratings[home] = Rh_new
+        ratings[away] = Ra_new
+
+    df["elo_home"] = elo_home_list
+    df["elo_away"] = elo_away_list
+
+    return df
+
+
+def _build_team_level_panel(raw_games: pd.DataFrame) -> pd.DataFrame:
+    df = raw_games.copy()
     if not np.issubdtype(df["date"].dtype, np.datetime64):
         df["date"] = pd.to_datetime(df["date"])
 
-    # ---- 예시 피처 설계 (필요 시 원하는 만큼 더 추가/수정) ----
-    # 숫자형 컬럼만 선별
-    num_cols = df.select_dtypes(include=["number"]).columns.tolist()
-    drop_for_features = {
-        "game_id",
-        "season",
-        "home_score",
-        "away_score",
-        "target",
+    # ✅ MUST: team_panel 만들기 전에 점수 없는 경기 제거
+    df = df.dropna(subset=["home_score", "away_score"]).copy()
+    df = df.sort_values("date").reset_index(drop=True)
+
+    has_elo = "elo_home" in df.columns and "elo_away" in df.columns
+
+    # -----------------------------
+    # 1) 홈 팀 레코드
+    # -----------------------------
+    cols_home = ["game_id", "date", "season", "home_team", "home_score", "away_score"]
+    if has_elo:
+        cols_home.append("elo_home")
+
+    home_df = df[cols_home].copy()
+    home_df.rename(
+        columns={
+            "home_team": "team",
+            "home_score": "points_for",
+            "away_score": "points_against",
+        },
+        inplace=True,
+    )
+    home_df["is_home"] = 1
+
+    if has_elo:
+        home_df["elo_like"] = home_df["elo_home"]
+        home_df.drop(columns=["elo_home"], inplace=True)
+
+    # -----------------------------
+    # 2) 어웨이 팀 레코드
+    # -----------------------------
+    cols_away = ["game_id", "date", "season", "away_team", "away_score", "home_score"]
+    if has_elo:
+        cols_away.append("elo_away")
+
+    away_df = df[cols_away].copy()
+    away_df.rename(
+        columns={
+            "away_team": "team",
+            "away_score": "points_for",
+            "home_score": "points_against",
+        },
+        inplace=True,
+    )
+    away_df["is_home"] = 0
+
+    if has_elo:
+        away_df["elo_like"] = away_df["elo_away"]
+        away_df.drop(columns=["elo_away"], inplace=True)
+
+    # -----------------------------
+    # 3) team × game 패널 + 기본 지표
+    # -----------------------------
+    team_panel = pd.concat([home_df, away_df], ignore_index=True)
+    team_panel.sort_values(["team", "date"], inplace=True)
+
+    team_panel["win"] = (team_panel["points_for"] > team_panel["points_against"]).astype(int)
+    team_panel["point_diff"] = team_panel["points_for"] - team_panel["points_against"]
+
+    # -----------------------------
+    # 4) advanced rating merge  (ROBUST + FALLBACK)
+    # -----------------------------
+    def _norm_team_name(x: object) -> str:
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return ""
+        s = str(x).strip()
+        s = " ".join(s.split())
+        return s
+    
+    # -----------------------------
+    # ✅ Canonical team name system (NO MISSING TEAMS)
+    # -----------------------------
+
+    # NBA 30 teams official-ish full names (canonical output)
+    CANON_TEAMS = {
+        "Atlanta Hawks",
+        "Boston Celtics",
+        "Brooklyn Nets",
+        "Charlotte Hornets",
+        "Chicago Bulls",
+        "Cleveland Cavaliers",
+        "Dallas Mavericks",
+        "Denver Nuggets",
+        "Detroit Pistons",
+        "Golden State Warriors",
+        "Houston Rockets",
+        "Indiana Pacers",
+        "Los Angeles Clippers",
+        "Los Angeles Lakers",
+        "Memphis Grizzlies",
+        "Miami Heat",
+        "Milwaukee Bucks",
+        "Minnesota Timberwolves",
+        "New Orleans Pelicans",
+        "New York Knicks",
+        "Oklahoma City Thunder",
+        "Orlando Magic",
+        "Philadelphia 76ers",
+        "Phoenix Suns",
+        "Portland Trail Blazers",
+        "Sacramento Kings",
+        "San Antonio Spurs",
+        "Toronto Raptors",
+        "Utah Jazz",
+        "Washington Wizards",
     }
-    base_numeric = [c for c in num_cols if c not in drop_for_features]
 
-    # 예: home/away 차이형 피처가 있다면 (home_off_rt - away_off_rt)처럼 만들 수 있음.
-    # 여기서는 간단히 base_numeric 전체를 사용 (이미 home관점으로 들어있다고 가정)
-    feature_cols = base_numeric
+    # Extra alias -> canonical full name
+    TEAM_ALIASES_TO_CANON = {
+        # LA teams (your logs show "LA Clippers")
+        "LA Clippers": "Los Angeles Clippers",
+        "Los Angeles Clippers": "Los Angeles Clippers",
+        "L.A. Clippers": "Los Angeles Clippers",
 
-    df_model = df[
-        ["game_id", "date", "season", "home_team", "away_team", "target"] + feature_cols
-    ].dropna(subset=feature_cols + ["target"])
+        "LA Lakers": "Los Angeles Lakers",
+        "Los Angeles Lakers": "Los Angeles Lakers",
+        "L.A. Lakers": "Los Angeles Lakers",
 
-    return df_model, feature_cols
+        # Common short city forms (just in case)
+        "Golden State": "Golden State Warriors",
+        "GS Warriors": "Golden State Warriors",
+        "Warriors": "Golden State Warriors",
+
+        "New York": "New York Knicks",
+        "NY Knicks": "New York Knicks",
+        "Knicks": "New York Knicks",
+
+        "Brooklyn": "Brooklyn Nets",
+        "Nets": "Brooklyn Nets",
+
+        "Oklahoma City": "Oklahoma City Thunder",
+        "OKC": "Oklahoma City Thunder",
+        "Thunder": "Oklahoma City Thunder",
+
+        "New Orleans": "New Orleans Pelicans",
+        "Pelicans": "New Orleans Pelicans",
+
+        "San Antonio": "San Antonio Spurs",
+        "Spurs": "San Antonio Spurs",
+
+        "Phoenix": "Phoenix Suns",
+        "Suns": "Phoenix Suns",
+
+        "Portland": "Portland Trail Blazers",
+        "Trail Blazers": "Portland Trail Blazers",
+        "Blazers": "Portland Trail Blazers",
+
+        "Philadelphia": "Philadelphia 76ers",
+        "Sixers": "Philadelphia 76ers",
+        "76ers": "Philadelphia 76ers",
+
+        "Minnesota": "Minnesota Timberwolves",
+        "Timberwolves": "Minnesota Timberwolves",
+        "Wolves": "Minnesota Timberwolves",
+
+        "Washington": "Washington Wizards",
+        "Wizards": "Washington Wizards",
+
+        "Charlotte": "Charlotte Hornets",
+        "Hornets": "Charlotte Hornets",
+
+        "Cleveland": "Cleveland Cavaliers",
+        "Cavs": "Cleveland Cavaliers",
+        "Cavaliers": "Cleveland Cavaliers",
+
+        "Detroit": "Detroit Pistons",
+        "Pistons": "Detroit Pistons",
+
+        "Indiana": "Indiana Pacers",
+        "Pacers": "Indiana Pacers",
+
+        "Milwaukee": "Milwaukee Bucks",
+        "Bucks": "Milwaukee Bucks",
+
+        "Miami": "Miami Heat",
+        "Heat": "Miami Heat",
+
+        "Orlando": "Orlando Magic",
+        "Magic": "Orlando Magic",
+
+        "Memphis": "Memphis Grizzlies",
+        "Grizzlies": "Memphis Grizzlies",
+
+        "Sacramento": "Sacramento Kings",
+        "Kings": "Sacramento Kings",
+
+        "Utah": "Utah Jazz",
+        "Jazz": "Utah Jazz",
+
+        "Denver": "Denver Nuggets",
+        "Nuggets": "Denver Nuggets",
+
+        "Dallas": "Dallas Mavericks",
+        "Mavericks": "Dallas Mavericks",
+        "Mavs": "Dallas Mavericks",
+
+        "Houston": "Houston Rockets",
+        "Rockets": "Houston Rockets",
+
+        "Chicago": "Chicago Bulls",
+        "Bulls": "Chicago Bulls",
+
+        "Boston": "Boston Celtics",
+        "Celtics": "Boston Celtics",
+
+        "Atlanta": "Atlanta Hawks",
+        "Hawks": "Atlanta Hawks",
+
+        "Toronto": "Toronto Raptors",
+        "Raptors": "Toronto Raptors",
+    }
+
+    def _canon_team(x: object) -> str:
+        """
+        Convert anything (abbr/full/alias) into one of CANON_TEAMS if possible.
+        """
+        t = _norm_team_name(x)
+
+        # 1) ABBR -> FULL (uses your ABBR_TO_FULL defined below; safe even if not found)
+        # NOTE: ABBR_TO_FULL may not exist yet at function definition time, but will exist at runtime.
+        try:
+            t = ABBR_TO_FULL.get(t, t)
+        except NameError:
+            pass
+
+        # 2) alias -> canonical
+        t = TEAM_ALIASES_TO_CANON.get(t, t)
+
+        # 3) final guard: if it already matches canonical list, keep; else keep as-is (and we will print it)
+        return t
 
 
-def build_today_feature_df(
+
+
+    ABBR_TO_FULL = {
+        "ATL": "Atlanta Hawks", "BOS": "Boston Celtics", "BKN": "Brooklyn Nets", "BRK": "Brooklyn Nets",
+        "CHA": "Charlotte Hornets", "CHO": "Charlotte Hornets", "CHI": "Chicago Bulls", "CLE": "Cleveland Cavaliers",
+        "DAL": "Dallas Mavericks", "DEN": "Denver Nuggets", "DET": "Detroit Pistons", "GSW": "Golden State Warriors",
+        "GS": "Golden State Warriors", "HOU": "Houston Rockets", "IND": "Indiana Pacers", "LAC": "Los Angeles Clippers",
+        "LAL": "Los Angeles Lakers", "MEM": "Memphis Grizzlies", "MIA": "Miami Heat", "MIL": "Milwaukee Bucks",
+        "MIN": "Minnesota Timberwolves", "NOP": "New Orleans Pelicans", "NO": "New Orleans Pelicans",
+        "NYK": "New York Knicks", "OKC": "Oklahoma City Thunder", "ORL": "Orlando Magic",
+        "PHI": "Philadelphia 76ers", "PHX": "Phoenix Suns", "PHO": "Phoenix Suns", "POR": "Portland Trail Blazers",
+        "SAC": "Sacramento Kings", "SAS": "San Antonio Spurs", "SA": "San Antonio Spurs",
+        "TOR": "Toronto Raptors", "UTA": "Utah Jazz", "WAS": "Washington Wizards", "WSH": "Washington Wizards",
+    }
+
+    team_panel["team"] = team_panel["team"].apply(_canon_team)
+
+    adv_panel = build_team_advanced_stats_panel(df)
+
+    print("[DEBUG][ADV] adv_panel is None?", adv_panel is None)
+    print("[DEBUG][ADV] adv_panel rows =", 0 if adv_panel is None else len(adv_panel))
+    if adv_panel is not None and not adv_panel.empty:
+        print("[DEBUG][ADV] adv_panel cols =", list(adv_panel.columns))
+
+        adv_tmp = adv_panel.copy()
+
+        # -----------------------------
+        # team key normalize (핵심 FIX)
+        # - adv_panel은 team_name이 더 믿을만한 경우가 많아서 우선 사용
+        # -----------------------------
+        # -----------------------------
+        # team key normalize (핵심 FIX)
+        # - adv_panel은 team_name이 더 믿을만한 경우가 많아서 우선 사용
+        # - 최종적으로 team은 CANON 30팀 풀네임으로 강제
+        # -----------------------------
+        if "team_name" in adv_tmp.columns and adv_tmp["team_name"].notna().any():
+            adv_tmp["team"] = adv_tmp["team_name"].apply(_canon_team)
+        elif "team" in adv_tmp.columns:
+            adv_tmp["team"] = adv_tmp["team"].apply(_canon_team)
+        else:
+            adv_tmp["team"] = ""
+
+
+
+        
+        print("[DEBUG][ADV] team_panel team sample:", team_panel["team"].dropna().unique()[:5])
+        print("[DEBUG][ADV] adv_tmp team sample:", adv_tmp["team"].dropna().unique()[:5])
+
+
+
+
+        # keep only needed cols (if exist)
+        rating_cols = [c for c in ["off_rating", "def_rating", "net_rating"] if c in adv_tmp.columns]
+        base_cols = ["team"] + rating_cols
+        has_game_id = "game_id" in adv_tmp.columns
+
+        # --- Case 1: game_id exists -> try strict merge on (game_id, team)
+        if has_game_id:
+            adv_tmp["game_id"] = pd.to_numeric(adv_tmp["game_id"], errors="coerce")
+            team_panel["game_id"] = pd.to_numeric(team_panel["game_id"], errors="coerce")
+
+            keep_cols = ["game_id", "team"] + rating_cols
+            adv_tmp = adv_tmp[keep_cols].dropna(subset=["game_id", "team"]).drop_duplicates(["game_id", "team"])
+            
+            
+            # ✅ NO-MISSING-TEAMS checks (정말 before merge)
+            tp_teams = set(team_panel["team"].dropna().unique())
+            adv_teams = set(adv_tmp["team"].dropna().unique())
+
+            unknown_tp = sorted([t for t in tp_teams if t not in CANON_TEAMS])
+            unknown_adv = sorted([t for t in adv_teams if t not in CANON_TEAMS])
+
+            print("[DEBUG][ADV] team_panel unique teams =", len(tp_teams), "adv_tmp unique teams =", len(adv_teams))
+            print("[DEBUG][ADV] overlap teams =", len(tp_teams & adv_teams))
+            print("[DEBUG][ADV] unknown team_panel (non-canon) =", unknown_tp[:20])
+            print("[DEBUG][ADV] unknown adv_tmp (non-canon) =", unknown_adv[:20])
+
+        
+            
+            
+
+            team_panel = team_panel.merge(adv_tmp, how="left", on=["game_id", "team"])
+            
+     
+
+
+
+            
+            # 🔍 DEBUG: game_id 체계 비교
+            print("[DEBUG][ADV] team_panel game_id sample:",
+                team_panel["game_id"].dropna().astype(int).head(3).tolist())
+            print("[DEBUG][ADV] adv_tmp game_id sample:",
+                adv_tmp["game_id"].dropna().astype(int).head(3).tolist())
+            print("[DEBUG][ADV] game_id ranges tp/adv:",
+                (team_panel["game_id"].min(), team_panel["game_id"].max()),
+                (adv_tmp["game_id"].min(), adv_tmp["game_id"].max()))
+
+            print("[DEBUG][ADV] coverage(off_rating) =",
+                team_panel.get("off_rating", pd.Series(dtype=float)).notna().mean())
+
+
+            cov = team_panel["off_rating"].notna().mean() if "off_rating" in team_panel.columns else 0.0
+            print("[DEBUG][ADV] strict merge coverage(off_rating) =", cov)
+
+            # --- Fallback if strict merge fails (likely different game_id system)
+            if cov < 0.01:
+                print("[DEBUG][ADV] strict merge 0% → fallback to TEAM-ONLY merge (season-level adv)")
+                # collapse to team-level mean (or last)
+                adv_team = adv_panel.copy()
+                if "team_name" in adv_team.columns and adv_team["team_name"].notna().any():
+                    adv_team["team"] = adv_team["team_name"].apply(_canon_team)
+                elif "team" in adv_team.columns:
+                    adv_team["team"] = adv_team["team"].apply(_canon_team)
+                else:
+                    adv_team["team"] = ""
+
+
+                adv_team = adv_team[base_cols].dropna(subset=["team"]).groupby("team", as_index=False)[rating_cols].mean()
+
+                adv_team = adv_team.rename(columns={c: f"season_{c}" for c in rating_cols})
+                team_panel = team_panel.merge(adv_team, how="left", on=["team"])
+
+                # 편의상 off_rating/def_rating/net_rating에 season_값을 채워 넣기
+                for c in rating_cols:
+                    base = c
+                    season_c = f"season_{c}"
+                    if base not in team_panel.columns:
+                        team_panel[base] = team_panel[season_c]
+                    else:
+                        team_panel[base] = team_panel[base].fillna(team_panel[season_c])
+
+                cov2 = team_panel["off_rating"].notna().mean() if "off_rating" in team_panel.columns else 0.0
+                print("[DEBUG][ADV] fallback TEAM-ONLY coverage(off_rating) =", cov2)
+
+        # --- Case 2: no game_id -> it’s team-level already, merge on team
+        else:
+            print("[DEBUG][ADV] adv_panel has NO game_id → TEAM-ONLY merge")
+            adv_team = adv_tmp[base_cols].dropna(subset=["team"]).groupby("team", as_index=False)[rating_cols].mean()
+            adv_team = adv_team.rename(columns={c: f"season_{c}" for c in rating_cols})
+
+            team_panel = team_panel.merge(adv_team, how="left", on=["team"])
+
+            # off_rating/def_rating/net_rating로도 채워서 downstream 코드 그대로 동작
+            for c in rating_cols:
+                base = c
+                season_c = f"season_{c}"
+                if base not in team_panel.columns:
+                    team_panel[base] = team_panel[season_c]
+                else:
+                    team_panel[base] = team_panel[base].fillna(team_panel[season_c])
+
+            cov = team_panel["off_rating"].notna().mean() if "off_rating" in team_panel.columns else 0.0
+            print("[DEBUG][ADV] TEAM-ONLY coverage(off_rating) =", cov)
+
+    else:
+        print("[DEBUG][ADV] adv_panel is empty or None")
+
+
+
+
+
+    # -----------------------------
+    # 5) 팀별 rolling / 시즌 누적
+    #    ✅ FIX: min_periods=1 로 데이터 삭제(초반 NaN) 크게 줄임
+    # -----------------------------
+    def _add_rolling(g: pd.DataFrame) -> pd.DataFrame:
+        g = g.sort_values("date").copy()
+
+        # ✅ PRE-GAME로 만들기: 현재 경기 결과를 절대 쓰지 않도록 1경기 lag
+        win_l1 = g["win"].shift(1)
+        pdiff_l1 = g["point_diff"].shift(1)
+        pf_l1 = g["points_for"].shift(1)
+        pa_l1 = g["points_against"].shift(1)
+        is_home_l1 = g["is_home"].shift(1)
+
+        # ---- 10-game rolling (PRE-GAME) ----
+        g["rolling_win_rate_10"] = win_l1.rolling(10, min_periods=1).mean()
+        g["rolling_point_diff_10"] = pdiff_l1.rolling(10, min_periods=1).mean()
+        g["rolling_points_for_10"] = pf_l1.rolling(10, min_periods=1).mean()
+        g["rolling_points_against_10"] = pa_l1.rolling(10, min_periods=1).mean()
+        g["rolling_home_ratio_10"] = is_home_l1.rolling(10, min_periods=1).mean()
+
+        # ---- 5-game rolling (PRE-GAME) ----
+        g["rolling_win_rate_5"] = win_l1.rolling(5, min_periods=1).mean()
+        g["rolling_point_diff_5"] = pdiff_l1.rolling(5, min_periods=1).mean()
+        g["rolling_points_for_5"] = pf_l1.rolling(5, min_periods=1).mean()
+        g["rolling_points_against_5"] = pa_l1.rolling(5, min_periods=1).mean()
+        g["rolling_home_ratio_5"] = is_home_l1.rolling(5, min_periods=1).mean()
+
+        # ✅ 시즌 누적도 PRE-GAME (shift 1)
+        # season_games: 지금 경기 포함 X → 이전까지 몇 경기 했는지
+        g["season_games"] = g.groupby("season").cumcount()
+
+        g["season_wins"] = g.groupby("season")["win"].shift(1).fillna(0).groupby(g["season"]).cumsum()
+        g["season_win_rate"] = np.where(g["season_games"] > 0, g["season_wins"] / g["season_games"], np.nan)
+
+        g["season_point_diff_cum"] = g.groupby("season")["point_diff"].shift(1).fillna(0).groupby(g["season"]).cumsum()
+        g["season_point_diff_avg"] = np.where(g["season_games"] > 0, g["season_point_diff_cum"] / g["season_games"], np.nan)
+
+        # ✅ advanced rating도 PRE-GAME rolling
+        for col in ["off_rating", "def_rating", "net_rating"]:
+            if col in g.columns:
+                col_l1 = g[col].shift(1)
+                g[f"rolling_{col}_10"] = col_l1.rolling(10, min_periods=1).mean()
+                g[f"rolling_{col}_5"] = col_l1.rolling(5, min_periods=1).mean()
+
+        return g
+
+
+
+    team_panel = team_panel.groupby("team", group_keys=False).apply(_add_rolling)
+
+    # -----------------------------
+    # 6) rest_days, back-to-back
+    # -----------------------------
+    team_panel["prev_date"] = team_panel.groupby("team")["date"].shift(1)
+    team_panel["rest_days"] = (team_panel["date"] - team_panel["prev_date"]).dt.days
+    team_panel["is_back_to_back"] = (team_panel["rest_days"] == 1).astype(int)
+    
+    # -----------------------------
+    # 6.5) 4-in-6 (NEW)
+    #   - 해당 경기 날짜 포함, 최근 6일(오늘 포함) 안에 치른 경기 수 >= 4
+    # -----------------------------
+    def _add_4in6(g: pd.DataFrame) -> pd.DataFrame:
+        g = g.sort_values("date").copy()
+
+        # date -> datetime64 보장
+        dts = pd.to_datetime(g["date"]).values.astype("datetime64[D]")
+
+        # rolling count in 6-day window (inclusive)
+        # 구현: 각 index i에 대해 [date_i - 5, date_i] 범위 안 경기 수
+        counts = np.zeros(len(g), dtype=int)
+        j = 0
+        for i in range(len(g)):
+            # window start = date_i - 5 days
+            start = dts[i] - np.timedelta64(5, "D")
+            while dts[j] < start:
+                j += 1
+            counts[i] = i - j + 1
+
+        g["games_in_last_6_days"] = pd.Series(counts, index=g.index).shift(1)
+        g["is_4in6"] = (g["games_in_last_6_days"].fillna(0) >= 4).astype(int)
+
+        return g
+
+    team_panel = team_panel.groupby("team", group_keys=False).apply(_add_4in6)
+
+
+
+
+    print(f"[DEBUG][TEAM_PANEL] rows={len(team_panel)}, teams={team_panel['team'].nunique()}")
+    print("[DEBUG][TEAM_PANEL] any missing points_for/against?", team_panel[["points_for", "points_against"]].isna().any().to_dict())
+
+    return team_panel
+
+
+def build_training_dataset(raw_games: pd.DataFrame) -> Tuple[pd.DataFrame, list[str]]:
+    """
+    raw_games → game 단위 학습 데이터셋 (home 관점)
+
+    ✅ FIX 목표:
+      1) 점수 없는 경기만 제거 (훈련용 target 때문)
+      2) feature NaN 때문에 대량 dropna 하지 않음
+         → feature는 평균으로 채워서 데이터량을 올드와 비슷하게 유지
+    """
+    rg = raw_games.copy()
+
+    print(f"[DEBUG][TRAIN] raw_games rows = {len(raw_games)}")
+    missing_scores = raw_games[["home_score", "away_score"]].isna().any(axis=1).sum()
+    print(f"[DEBUG][TRAIN] games with missing score = {missing_scores}")
+
+    if not np.issubdtype(rg["date"].dtype, np.datetime64):
+        rg["date"] = pd.to_datetime(rg["date"])
+
+    # ✅ 점수 없는 경기만 제거 (target 생성 불가)
+    rg = rg.dropna(subset=["home_score", "away_score"]).copy()
+    print(f"[DEBUG][TRAIN] after dropna(score) rows = {len(rg)}")
+
+    # 1) Elo 추가
+    rg = _add_elo_to_games(rg)
+
+    # 2) 팀 패널 생성
+    team_panel = _build_team_level_panel(rg)
+
+    df = rg.copy()
+
+    # -----------------------------
+    # 3) 홈 팀 스탯 merge
+    # -----------------------------
+    home_stats = team_panel.add_suffix("_home").rename(
+        columns={
+            "team_home": "home_team",
+            "date_home": "date",
+            "game_id_home": "game_id",
+            "season_home": "season",
+        }
+    )
+
+    home_cols_base = [
+        "game_id",
+        "home_team",
+        "date",
+        "rolling_win_rate_10_home",
+        "rolling_point_diff_10_home",
+        "season_win_rate_home",
+        "season_point_diff_avg_home",
+        "rest_days_home",
+        "is_back_to_back_home",
+        "elo_like_home",
+        "rolling_off_rating_10_home",
+        "rolling_def_rating_10_home",
+        "rolling_net_rating_10_home",
+        "season_games_home",
+        "rolling_win_rate_5_home",
+        "rolling_point_diff_5_home",
+        "rolling_points_for_5_home",
+        "rolling_points_against_5_home",
+        "rolling_home_ratio_5_home",
+        "is_4in6_home",
+        "games_in_last_6_days_home",
+
+
+    ]
+    home_cols = [c for c in home_cols_base if c in home_stats.columns]
+
+    df = df.merge(home_stats[home_cols], on=["game_id", "home_team", "date"], how="left")
+
+    # -----------------------------
+    # 4) 어웨이 팀 스탯 merge
+    # -----------------------------
+    away_stats = team_panel.add_suffix("_away").rename(
+        columns={
+            "team_away": "away_team",
+            "date_away": "date",
+            "game_id_away": "game_id",
+            "season_away": "season",
+        }
+    )
+
+    away_cols_base = [
+        "game_id",
+        "away_team",
+        "date",
+        "rolling_win_rate_10_away",
+        "rolling_point_diff_10_away",
+        "season_win_rate_away",
+        "season_point_diff_avg_away",
+        "rest_days_away",
+        "is_back_to_back_away",
+        "elo_like_away",
+        "rolling_off_rating_10_away",
+        "rolling_def_rating_10_away",
+        "rolling_net_rating_10_away",
+        "season_games_away",
+        "rolling_win_rate_5_away",
+        "rolling_point_diff_5_away",
+        "rolling_points_for_5_away",
+        "rolling_points_against_5_away",
+        "rolling_home_ratio_5_away",
+        "is_4in6_away",
+        "games_in_last_6_days_away",
+
+    ]
+    away_cols = [c for c in away_cols_base if c in away_stats.columns]
+
+    df = df.merge(away_stats[away_cols], on=["game_id", "away_team", "date"], how="left")
+
+    # -----------------------------
+    # 5) target
+    # -----------------------------
+    df["target"] = (df["home_score"] > df["away_score"]).astype(int)
+
+    # -----------------------------
+    # 6) diff 피처
+    # -----------------------------
+    df["diff_rolling_win_rate_10"] = df["rolling_win_rate_10_home"] - df["rolling_win_rate_10_away"]
+    df["diff_rolling_point_diff_10"] = df["rolling_point_diff_10_home"] - df["rolling_point_diff_10_away"]
+    df["diff_season_win_rate"] = df["season_win_rate_home"] - df["season_win_rate_away"]
+    df["diff_season_point_diff_avg"] = df["season_point_diff_avg_home"] - df["season_point_diff_avg_away"]
+    df["diff_elo_like"] = df["elo_like_home"] - df["elo_like_away"]
+    df["diff_rolling_win_rate_5"] = df["rolling_win_rate_5_home"] - df["rolling_win_rate_5_away"]
+    df["diff_rolling_point_diff_5"] = df["rolling_point_diff_5_home"] - df["rolling_point_diff_5_away"]
+    df["diff_is_4in6"] = df["is_4in6_home"] - df["is_4in6_away"]
+
+
+
+    if "rolling_off_rating_10_home" in df.columns and "rolling_off_rating_10_away" in df.columns:
+        df["diff_rolling_off_rating_10"] = df["rolling_off_rating_10_home"] - df["rolling_off_rating_10_away"]
+    if "rolling_def_rating_10_home" in df.columns and "rolling_def_rating_10_away" in df.columns:
+        df["diff_rolling_def_rating_10"] = df["rolling_def_rating_10_home"] - df["rolling_def_rating_10_away"]
+    if "rolling_net_rating_10_home" in df.columns and "rolling_net_rating_10_away" in df.columns:
+        df["diff_rolling_net_rating_10"] = df["rolling_net_rating_10_home"] - df["rolling_net_rating_10_away"]
+
+    # -----------------------------
+    # 7) feature_cols
+    # -----------------------------
+    feature_cols: list[str] = [
+        "rolling_win_rate_10_home",
+        "rolling_win_rate_10_away",
+        "rolling_point_diff_10_home",
+        "rolling_point_diff_10_away",
+        "season_win_rate_home",
+        "season_win_rate_away",
+        "season_point_diff_avg_home",
+        "season_point_diff_avg_away",
+        "rest_days_home",
+        "rest_days_away",
+        "is_back_to_back_home",
+        "is_back_to_back_away",
+        "elo_like_home",
+        "elo_like_away",
+        "diff_rolling_win_rate_10",
+        "diff_rolling_point_diff_10",
+        "diff_season_win_rate",
+        "diff_season_point_diff_avg",
+        "diff_elo_like",
+        "rolling_win_rate_5_home",
+        "rolling_win_rate_5_away",
+        "rolling_point_diff_5_home",
+        "rolling_point_diff_5_away",
+        "diff_rolling_win_rate_5",
+        "diff_rolling_point_diff_5",
+        "is_4in6_home",
+        "is_4in6_away",
+        "diff_is_4in6",
+
+    ]
+
+    extra_cols = [
+        "rolling_off_rating_10_home",
+        "rolling_off_rating_10_away",
+        "rolling_def_rating_10_home",
+        "rolling_def_rating_10_away",
+        "rolling_net_rating_10_home",
+        "rolling_net_rating_10_away",
+        "diff_rolling_off_rating_10",
+        "diff_rolling_def_rating_10",
+        "diff_rolling_net_rating_10",
+    ]
+    for c in extra_cols:
+        if c in df.columns:
+            feature_cols.append(c)
+            
+    feature_cols = [c for c in feature_cols if c in df.columns]
+    
+    # -----------------------------
+    # 8) 최종 train_df
+    #    ✅ FIX: 대량 dropna 제거 → 평균으로 채움
+    # -----------------------------
+    train_df = df[
+        ["game_id", "date", "season", "home_team", "away_team", "home_score", "away_score", "target",
+         "season_games_home", "season_games_away"]
+        + feature_cols
+    ].copy()
+
+    # 숫자형으로 강제
+    for c in feature_cols:
+        train_df[c] = pd.to_numeric(train_df[c], errors="coerce")
+
+    # feature 평균으로 impute (데이터량 유지)
+    fill_map = {c: float(train_df[c].mean()) for c in feature_cols}
+    train_df = train_df.fillna(fill_map)
+
+    train_df["date"] = pd.to_datetime(train_df["date"]).dt.date
+    return train_df, feature_cols
+
+
+def build_today_dataset(
+    raw_games: pd.DataFrame,
     today_games: pd.DataFrame,
-    feature_cols: list[str],
-) -> pd.DataFrame:
-    """
-    - 학습 때 사용한 feature_cols 기준으로,
-      오늘 경기 DataFrame을 모델 input 형태로 정리.
+    today: _date,
+):
+    if raw_games.empty or today_games.empty:
+        return pd.DataFrame(), []
 
-    today_games 예시 컬럼:
-      - game_id, date, home_team, away_team
-      - 같은 스키마의 feature 컬럼들 (home관점)
-      - american_odds (또는 american_odds_home/away 분리)
+    # ---------------------------
+    # 0) today_games 정규화
+    # ---------------------------
+    tg = today_games.copy()
+    
+    
+    # ✅✅✅ [ADD HERE] SAFE ABBR extraction block
+    def _extract_abbr_from_obj(x):
+        if isinstance(x, dict):
+            return x.get("abbreviation")
+        return None
 
-    여기서는 단일 'bets row' 기준으로:
-      - side == 'home'   → p_model = p_home_win
-      - side == 'away'   → p_model = 1 - p_home_win
-    """
-    df = today_games.copy()
-    missing = [c for c in feature_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"build_today_feature_df: missing features {missing} in today_games")
+    if "home_team_abbr" not in tg.columns:
+        if "home_team" in today_games.columns:
+            tg["home_team_abbr"] = today_games["home_team"].apply(_extract_abbr_from_obj)
+        else:
+            tg["home_team_abbr"] = None
 
-    return df
+    if "away_team_abbr" not in tg.columns:
+        if "away_team" in today_games.columns:
+            tg["away_team_abbr"] = today_games["away_team"].apply(_extract_abbr_from_obj)
+        elif "visitor_team" in today_games.columns:
+            tg["away_team_abbr"] = today_games["visitor_team"].apply(_extract_abbr_from_obj)
+        else:
+            tg["away_team_abbr"] = None
 
+    tg["home_team_abbr"] = tg["home_team_abbr"].astype(str).str.upper().replace({"NONE": np.nan, "NAN": np.nan})
+    tg["away_team_abbr"] = tg["away_team_abbr"].astype(str).str.upper().replace({"NONE": np.nan, "NAN": np.nan})
+
+    print("[DEBUG][TODAY] abbr null rate:",
+          tg["home_team_abbr"].isna().mean(),
+          tg["away_team_abbr"].isna().mean())
+    
+    
+    
+    
+    
+
+    if "game_id" not in tg.columns and "id" in tg.columns:
+        tg["game_id"] = tg["id"]
+
+    if "date" in tg.columns:
+        tg["date"] = pd.to_datetime(tg["date"]).dt.date
+    else:
+        tg["date"] = today
+
+    def _extract_full_name(x):
+        if isinstance(x, dict):
+            return x.get("full_name")
+        return x
+
+    if "home_team" in tg.columns:
+        tg["home_team"] = tg["home_team"].apply(_extract_full_name)
+
+    if "away_team" not in tg.columns and "visitor_team" in tg.columns:
+        tg["away_team"] = tg["visitor_team"].apply(_extract_full_name)
+    elif "away_team" in tg.columns:
+        tg["away_team"] = tg["away_team"].apply(_extract_full_name)
+        
+        
+    
+  
+
+
+ 
+
+    # ---------------------------
+    # 1) raw_games + Elo
+    # ---------------------------
+    rg = raw_games.copy()
+    if not np.issubdtype(rg["date"].dtype, np.datetime64):
+        rg["date"] = pd.to_datetime(rg["date"])
+
+    print(f"[DEBUG][TODAY] raw_games rows = {len(raw_games)}")
+    missing_scores = raw_games[["home_score", "away_score"]].isna().any(axis=1).sum()
+    print(f"[DEBUG][TODAY] games with missing score = {missing_scores}")
+
+    # ✅ 과거 점수 없는 경기만 제거
+    rg = rg.dropna(subset=["home_score", "away_score"]).copy()
+    print(f"[DEBUG][TODAY] after dropna(score) rows = {len(rg)}")
+
+    rg = _add_elo_to_games(rg)
+
+    if "season" not in tg.columns:
+        tg["season"] = rg["season"].max()
+
+    latest_season = rg["season"].max()
+    tg["season"] = tg["season"].apply(lambda s: latest_season if s > latest_season else s)
+
+    # ---------------------------
+    # 2) 팀 패널
+    # ---------------------------
+    team_panel = _build_team_level_panel(rg)
+
+    team_panel = team_panel.sort_values(["team", "date"])
+    last_rows = team_panel.groupby("team").tail(1).copy()
+    last_rows.rename(columns={"date": "last_game_date"}, inplace=True)
+    
+    # ✅ 오늘(today) 기준 4-in-6 재계산 (last_rows는 last game 기준이라 오차 가능)
+    cutoff = (pd.to_datetime(today) - pd.Timedelta(days=5)).normalize()
+    tmp6 = team_panel[pd.to_datetime(team_panel["date"]) >= cutoff].copy()
+
+    games6 = tmp6.groupby("team")["game_id"].count()
+    last_rows["games_in_last_6_days_today"] = last_rows["team"].map(games6).fillna(0).astype(int)
+    last_rows["is_4in6_today"] = (last_rows["games_in_last_6_days_today"] >= 4).astype(int)
+
+    # 기존 컬럼명 유지해서 아래 merge 로직 안 깨지게 덮어쓰기
+    last_rows["games_in_last_6_days"] = last_rows["games_in_last_6_days_today"]
+    last_rows["is_4in6"] = last_rows["is_4in6_today"]
+
+
+
+    last_rows["rest_days_today"] = (pd.to_datetime(today) - last_rows["last_game_date"]).dt.days
+    last_rows["is_back_to_back_today"] = (last_rows["rest_days_today"] == 1).astype(int)
+
+    base_keep_cols = [
+        "team",
+        "season",
+        "rolling_win_rate_10",
+        "rolling_point_diff_10",
+        "season_win_rate",
+        "season_point_diff_avg",
+        "elo_like",
+        "rest_days_today",
+        "is_back_to_back_today",
+        "rolling_off_rating_10",
+        "rolling_def_rating_10",
+        "rolling_net_rating_10",
+        "rolling_win_rate_5",
+        "rolling_point_diff_5",
+        "is_4in6",
+        "games_in_last_6_days",
+
+    ]
+    keep_cols = [c for c in base_keep_cols if c in last_rows.columns]
+    snap = last_rows[keep_cols].copy()
+
+    home_stats = snap.add_suffix("_home").rename(columns={"team_home": "home_team", "season_home": "season"})
+    away_stats = snap.add_suffix("_away").rename(columns={"team_away": "away_team", "season_away": "season"})
+
+    df = tg.copy()
+    df = df.merge(home_stats, how="left", on=["home_team", "season"])
+    df = df.merge(away_stats, how="left", on=["away_team", "season"], suffixes=("_home", "_away"))
+
+    df["diff_rolling_win_rate_10"] = df["rolling_win_rate_10_home"] - df["rolling_win_rate_10_away"]
+    df["diff_rolling_point_diff_10"] = df["rolling_point_diff_10_home"] - df["rolling_point_diff_10_away"]
+    df["diff_season_win_rate"] = df["season_win_rate_home"] - df["season_win_rate_away"]
+    df["diff_season_point_diff_avg"] = df["season_point_diff_avg_home"] - df["season_point_diff_avg_away"]
+    df["diff_elo_like"] = df["elo_like_home"] - df["elo_like_away"]
+    df["diff_rolling_win_rate_5"] = df["rolling_win_rate_5_home"] - df["rolling_win_rate_5_away"]
+    df["diff_rolling_point_diff_5"] = df["rolling_point_diff_5_home"] - df["rolling_point_diff_5_away"]
+    df["diff_is_4in6"] = df["is_4in6_home"] - df["is_4in6_away"]
+
+
+
+    if "rolling_off_rating_10_home" in df.columns and "rolling_off_rating_10_away" in df.columns:
+        df["diff_rolling_off_rating_10"] = df["rolling_off_rating_10_home"] - df["rolling_off_rating_10_away"]
+    if "rolling_def_rating_10_home" in df.columns and "rolling_def_rating_10_away" in df.columns:
+        df["diff_rolling_def_rating_10"] = df["rolling_def_rating_10_home"] - df["rolling_def_rating_10_away"]
+    if "rolling_net_rating_10_home" in df.columns and "rolling_net_rating_10_away" in df.columns:
+        df["diff_rolling_net_rating_10"] = df["rolling_net_rating_10_home"] - df["rolling_net_rating_10_away"]
+
+    df.rename(
+        columns={
+            "rest_days_today_home": "rest_days_home",
+            "rest_days_today_away": "rest_days_away",
+            "is_back_to_back_today_home": "is_back_to_back_home",
+            "is_back_to_back_today_away": "is_back_to_back_away",
+        },
+        inplace=True,
+    )
+
+    feature_cols = [
+        "rolling_win_rate_10_home",
+        "rolling_win_rate_10_away",
+        "rolling_point_diff_10_home",
+        "rolling_point_diff_10_away",
+        "season_win_rate_home",
+        "season_win_rate_away",
+        "season_point_diff_avg_home",
+        "season_point_diff_avg_away",
+        "rest_days_home",
+        "rest_days_away",
+        "is_back_to_back_home",
+        "is_back_to_back_away",
+        "elo_like_home",
+        "elo_like_away",
+        "diff_rolling_win_rate_10",
+        "diff_rolling_point_diff_10",
+        "diff_season_win_rate",
+        "diff_season_point_diff_avg",
+        "diff_elo_like",
+        "rolling_win_rate_5_home",
+        "rolling_win_rate_5_away",
+        "rolling_point_diff_5_home",
+        "rolling_point_diff_5_away",
+        "diff_rolling_win_rate_5",
+        "diff_rolling_point_diff_5",
+        "is_4in6_home",
+        "is_4in6_away",
+        "diff_is_4in6",
+
+
+    ]
+
+    extra_cols = [
+        "rolling_off_rating_10_home",
+        "rolling_off_rating_10_away",
+        "rolling_def_rating_10_home",
+        "rolling_def_rating_10_away",
+        "rolling_net_rating_10_home",
+        "rolling_net_rating_10_away",
+        "diff_rolling_off_rating_10",
+        "diff_rolling_def_rating_10",
+        "diff_rolling_net_rating_10",
+    ]
+    for c in extra_cols:
+        if c in df.columns:
+            feature_cols.append(c)
+
+    feature_cols = [c for c in feature_cols if c in df.columns]
+    
+    # ✅ 표준 ABBR 강제 생성/보정 (dict에서 뽑은 abbr이든, full_name이든 무조건 30팀 ABBR로)
+    tg["home_team_abbr_std"] = tg.get("home_team_abbr", None)
+    tg["away_team_abbr_std"] = tg.get("away_team_abbr", None)
+
+    tg["home_team_abbr_std"] = tg["home_team_abbr_std"].apply(to_abbr)
+    tg["away_team_abbr_std"] = tg["away_team_abbr_std"].apply(to_abbr)
+
+    # abbr이 비었으면 team full name으로 한번 더 채움
+    tg.loc[tg["home_team_abbr_std"].isna(), "home_team_abbr_std"] = tg.loc[
+        tg["home_team_abbr_std"].isna(), "home_team"
+    ].apply(to_abbr)
+
+    tg.loc[tg["away_team_abbr_std"].isna(), "away_team_abbr_std"] = tg.loc[
+        tg["away_team_abbr_std"].isna(), "away_team"
+    ].apply(to_abbr)
+
+    print("[DEBUG][TODAY] std abbr null rate:",
+        tg["home_team_abbr_std"].isna().mean(),
+        tg["away_team_abbr_std"].isna().mean())
+    
+    
+    
+
+    # -----------------------------
+    # ✅ FINAL today_df (KEEP ABBR)
+    # -----------------------------
+    base_cols = ["game_id", "date", "season", "home_team", "away_team"]
+
+    # ✅ odds 매칭은 무조건 std를 쓰자
+    for c in ["home_team_abbr_std", "away_team_abbr_std"]:
+        if c in df.columns:
+            base_cols.append(c)
 
     
+    today_df = df[base_cols + feature_cols].copy()
+
+
+    # ✅ 오늘은 target이 없으니까, feature 결측만 평균으로 채우면 됨
+    for c in feature_cols:
+        today_df[c] = pd.to_numeric(today_df[c], errors="coerce")
+
+    fill_map = {c: float(today_df[c].mean()) for c in feature_cols}
+    today_df = today_df.fillna(fill_map)
+
+    # 마지막으로, feature_cols 중 여전히 NaN(전부 NaN이던 컬럼)은 0으로
+    today_df = today_df.fillna(0.0)
+
+    return today_df, feature_cols
+
+
