@@ -20,7 +20,7 @@ nba_bot 보다 1/10 으로 작게 들어가는게 목표인 봇. 왜냐면, 시�
 - nba_features.py (nhl_features.py)
 - nba_injury_lineup.py ()
 - nba_margin_model.py (nhl_goal_diff_model.py)
-- nba_performance.py ()
+- nba_performance.py (nhl_performance.py)
 - nba_quant_bot.py (nhl_quant_bot.py)
 - nba_quant_main_next_day.py (nhl_quant_main_next_day.py)
 - nba_quant_main.py (nhl_quant_main.py)
@@ -32,21 +32,6 @@ nba_bot 보다 1/10 으로 작게 들어가는게 목표인 봇. 왜냐면, 시�
 
 
 
-
-	3.	nhl_performance.py
-
-	•	bet log 저장/정산/ROI/월별/누적
-	•	strategy tuning이 읽을 nhl_bet_log.csv 포맷을 여기서 고정
-
-
-
-	5.	nhl_advanced_stats.py
-
-	•	지금 피처 엔지니어링이 비교적 단순(롤링+Elo+rest)이라면,
-	•	나중에 xG, shot attempt, special teams 같은 고급 스탯 소스 붙일 때 여기서 확장
-
-	6.	nhl_injury_lineup.py
-
-	•	NHL은 라인/골리(Goalie)가 핵심이라 “선발 골리” 붙이는 순간 파워가 커짐
-	•	다만 데이터 소스/매칭이 귀찮아서 파이프라인 완성 후에 붙이는 게 맞음
+- nba_advanced_stats.py ()
+- nba_injury_lineup.py ()
 
