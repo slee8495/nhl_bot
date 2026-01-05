@@ -1,0 +1,465 @@
+# nhl_edge.py
+
+from __future__ import annotations
+import numpy as np
+import pandas as pd
+
+from nhl_strategy_tuning import load_strategy_config
+from nhl_team_abbr import to_abbr
+
+
+def american_to_prob(odds: float) -> float:
+    o = float(odds)
+    if o == 0:
+        return np.nan
+    if o > 0:
+        return 100.0 / (o + 100.0)
+    return -o / (-o + 100.0)
+
+
+def _classify_odds_bucket_by_implied(implied_p: float) -> str:
+    if pd.isna(implied_p):
+        return "unknown"
+    if implied_p >= 0.75:
+        return "big_favorite"
+    if implied_p >= 0.60:
+        return "normal_favorite"
+    if implied_p >= 0.40:
+        return "coinflip"
+    if implied_p >= 0.25:
+        return "normal_dog"
+    return "big_dog"
+
+
+def _compute_open_implied_from_history(
+    odds_df: pd.DataFrame,
+    history_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """
+    odds_df: 오늘 현재 snapshot
+    history_df: 과거 snapshot 누적 (game_id, team, bookmaker, american_odds, snapshot_ts)
+    return: odds_df + open_american_odds, open_implied_p (없으면 current fallback)
+    """
+    df = odds_df.copy()
+
+    df["open_american_odds"] = pd.to_numeric(df["american_odds"], errors="coerce")
+    df["open_implied_p"] = df["open_american_odds"].map(american_to_prob)
+
+    if history_df is None or history_df.empty:
+        return df
+
+    hist = history_df.copy()
+    if "snapshot_ts" not in hist.columns:
+        return df
+
+    hist["snapshot_ts"] = pd.to_datetime(hist["snapshot_ts"], errors="coerce")
+    hist_sorted = hist.sort_values("snapshot_ts")
+
+    open_hist = (
+        hist_sorted.groupby(["game_id", "team", "bookmaker"], as_index=False)
+        .first()[["game_id", "team", "bookmaker", "american_odds"]]
+        .rename(columns={"american_odds": "open_american_odds"})
+    )
+    open_hist["open_american_odds"] = pd.to_numeric(open_hist["open_american_odds"], errors="coerce")
+    open_hist["open_implied_p"] = open_hist["open_american_odds"].map(american_to_prob)
+
+    df = df.merge(
+        open_hist,
+        how="left",
+        on=["game_id", "team", "bookmaker"],
+        suffixes=("", "_hist"),
+    )
+
+    if "open_american_odds_hist" in df.columns:
+        df["open_american_odds"] = df["open_american_odds_hist"].combine_first(df["open_american_odds"])
+    if "open_implied_p_hist" in df.columns:
+        df["open_implied_p"] = df["open_implied_p_hist"].combine_first(df["open_implied_p"])
+
+    df.drop(
+        columns=[c for c in ["open_american_odds_hist", "open_implied_p_hist"] if c in df.columns],
+        inplace=True,
+    )
+    return df
+
+
+def add_edge_from_odds(
+    scored_games: pd.DataFrame,
+    odds_df: pd.DataFrame,
+    preferred_bookmaker: str | None = None,
+    market_blend_alpha: float = 0.7,
+    odds_history_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """
+    scored_games: today_df에 model prob 컬럼이 붙은 DF (game_id, home_team, away_team, p_home_win ...)
+    odds_df: Odds API DF (game_id/team/bookmaker/american_odds + home/away/team)
+    return: game_id + side(home/away) 기준 best price(=최소 implied)만 남긴 edge DF
+    """
+    if scored_games is None or scored_games.empty or odds_df is None or odds_df.empty:
+        return pd.DataFrame()
+
+    # bookmaker 선택
+    if preferred_bookmaker:
+        odds_sel = odds_df[odds_df["bookmaker"] == preferred_bookmaker].copy()
+        if odds_sel.empty:
+            odds_sel = odds_df.copy()
+    else:
+        odds_sel = odds_df.copy()
+
+    odds_sel = _compute_open_implied_from_history(odds_sel, odds_history_df)
+
+    # =============================
+    # ✅ DEBUG: which games missing in odds
+    # =============================
+    if "game_id" in odds_sel.columns and "game_id" in scored_games.columns:
+        _og = set(pd.to_numeric(odds_sel["game_id"], errors="coerce").dropna().astype(int).tolist())
+        _sg = set(pd.to_numeric(scored_games["game_id"], errors="coerce").dropna().astype(int).tolist())
+        _missing = sorted(list(_sg - _og))
+        if _missing:
+            print(f"[DEBUG][EDGE][MISSING_ODDS_GAME_ID] missing_count={len(_missing)} sample={_missing[:10]}")
+
+    # =============================
+    # ✅ FORCE canonical ABBR columns on BOTH sides
+    # =============================
+    def _safe_to_abbr(x):
+        try:
+            return to_abbr(x)
+        except Exception:
+            return None
+
+    # ---- Odds side: always create abbr columns (home/away/team)
+    if "home_team_abbr" not in odds_sel.columns:
+        odds_sel["home_team_abbr"] = odds_sel["home_team"].apply(_safe_to_abbr)
+    else:
+        odds_sel["home_team_abbr"] = odds_sel["home_team_abbr"].apply(_safe_to_abbr)
+
+    if "away_team_abbr" not in odds_sel.columns:
+        odds_sel["away_team_abbr"] = odds_sel["away_team"].apply(_safe_to_abbr)
+    else:
+        odds_sel["away_team_abbr"] = odds_sel["away_team_abbr"].apply(_safe_to_abbr)
+
+    if "team_abbr" not in odds_sel.columns:
+        odds_sel["team_abbr"] = odds_sel["team"].apply(_safe_to_abbr)
+    else:
+        odds_sel["team_abbr"] = odds_sel["team_abbr"].apply(_safe_to_abbr)
+
+    # ---- Scored-games side: ensure home/away abbr exist
+    sg = scored_games.copy()
+
+    if "home_team_abbr" not in sg.columns:
+        sg["home_team_abbr"] = sg["home_team"].apply(_safe_to_abbr)
+    else:
+        sg["home_team_abbr"] = sg["home_team_abbr"].apply(_safe_to_abbr)
+
+    if "away_team_abbr" not in sg.columns:
+        sg["away_team_abbr"] = sg["away_team"].apply(_safe_to_abbr)
+    else:
+        sg["away_team_abbr"] = sg["away_team_abbr"].apply(_safe_to_abbr)
+
+    # cleanup (upper)
+    for c in ["home_team_abbr", "away_team_abbr", "team_abbr"]:
+        if c in odds_sel.columns:
+            odds_sel[c] = odds_sel[c].astype(str).str.upper().replace({"NONE": np.nan, "NAN": np.nan})
+    for c in ["home_team_abbr", "away_team_abbr"]:
+        if c in sg.columns:
+            sg[c] = sg[c].astype(str).str.upper().replace({"NONE": np.nan, "NAN": np.nan})
+
+    print("[DEBUG][EDGE][ABBR] null rate odds(home,away,team):",
+          odds_sel["home_team_abbr"].isna().mean(),
+          odds_sel["away_team_abbr"].isna().mean(),
+          odds_sel["team_abbr"].isna().mean())
+
+    print("[DEBUG][EDGE][ABBR] null rate scored(home,away):",
+          sg["home_team_abbr"].isna().mean(),
+          sg["away_team_abbr"].isna().mean())
+
+    # fallback (old behavior)
+    odds_sel["home_team_norm"] = odds_sel["home_team"].astype(str).str.lower()
+    odds_sel["away_team_norm"] = odds_sel["away_team"].astype(str).str.lower()
+    odds_sel["team_norm"] = odds_sel["team"].astype(str).str.lower()
+
+    sg["home_team_norm"] = sg["home_team"].astype(str).str.lower()
+    sg["away_team_norm"] = sg["away_team"].astype(str).str.lower()
+
+    merged_rows = []
+    FLIP_GAP_TH = 0.12
+
+    for _, g in sg.iterrows():
+        gid = g.get("game_id", None)
+        if gid is None:
+            continue
+
+        cand = pd.DataFrame()
+        use_abbr = False
+
+        # ✅ ALWAYS define keys up-front
+        ht_abbr = g.get("home_team_abbr")
+        at_abbr = g.get("away_team_abbr")
+        ht_key = str(ht_abbr).strip().upper() if pd.notna(ht_abbr) else None
+        at_key = str(at_abbr).strip().upper() if pd.notna(at_abbr) else None
+
+        # (1) game_id exact match
+        if "game_id" in odds_sel.columns:
+            ogid = pd.to_numeric(odds_sel["game_id"], errors="coerce")
+            gid_int = pd.to_numeric(pd.Series([gid]), errors="coerce").iloc[0]
+            if pd.notna(gid_int):
+                cand = odds_sel[ogid == int(gid_int)].copy()
+                use_abbr = True
+                if ht_key is None or at_key is None:
+                    use_abbr = False
+
+        # (2) abbr match
+        if cand.empty and (ht_key is not None) and (at_key is not None):
+            cand = odds_sel[
+                (odds_sel["home_team_abbr"].astype(str).str.upper() == ht_key) &
+                (odds_sel["away_team_abbr"].astype(str).str.upper() == at_key)
+            ].copy()
+            use_abbr = True
+
+            # swap fallback (provider home/away flip)
+            if cand.empty:
+                cand = odds_sel[
+                    (odds_sel["home_team_abbr"].astype(str).str.upper() == at_key) &
+                    (odds_sel["away_team_abbr"].astype(str).str.upper() == ht_key)
+                ].copy()
+                if not cand.empty:
+                    ht_key, at_key = at_key, ht_key
+
+        # (3) norm fallback
+        if cand.empty:
+            ht_key = g["home_team_norm"]
+            at_key = g["away_team_norm"]
+            cand = odds_sel[
+                (odds_sel["home_team_norm"] == ht_key) &
+                (odds_sel["away_team_norm"] == at_key)
+            ].copy()
+            use_abbr = False
+
+        if cand.empty:
+            print(
+                "[DEBUG][EDGE][NO_CAND]",
+                "gid=", gid,
+                "| home=", g.get("home_team"),
+                "| away=", g.get("away_team"),
+            )
+            continue
+
+        if use_abbr and (ht_key is None or at_key is None):
+            use_abbr = False
+            ht_key = g["home_team_norm"]
+            at_key = g["away_team_norm"]
+
+        # ---------- model probs ----------
+        # 운영용: p_home_win_adj > p_home_win > fallback
+        p_home = float(g.get("p_home_win_adj", g.get("p_home_win", np.nan)))
+        if pd.isna(p_home):
+            continue
+
+        p_home_xgb = float(g.get("p_home_win_xgb_lineup", p_home))
+
+        # NHL goal diff 기반 보조확률 컬럼명들 fallback
+        p_home_gd = (
+            g.get("p_home_win_from_goal_diff", None)
+            if "p_home_win_from_goal_diff" in g
+            else g.get("p_home_win_from_margin", None)
+        )
+        if p_home_gd is None:
+            p_home_gd = p_home
+        p_home_gd = float(p_home_gd)
+
+        # Elo 보조확률 (있으면)
+        p_home_elo = None
+        if "diff_elo_like" in g:
+            try:
+                diff_elo = float(g.get("diff_elo_like"))
+                p_home_elo = 1.0 / (1.0 + 10.0 ** (-diff_elo / 400.0))
+            except Exception:
+                p_home_elo = None
+        if p_home_elo is None:
+            p_home_elo = float(g.get("p_home_win_elo", p_home))
+
+        for _, row in cand.iterrows():
+            # ---------- determine side ----------
+            if use_abbr:
+                team_key = str(row.get("team_abbr", "")).strip().upper()
+                if team_key == ht_key:
+                    side = "home"
+                    model_p_raw = p_home
+                    p_xgb, p_gd, p_elo = p_home_xgb, p_home_gd, p_home_elo
+                elif team_key == at_key:
+                    side = "away"
+                    model_p_raw = 1.0 - p_home
+                    p_xgb, p_gd, p_elo = 1.0 - p_home_xgb, 1.0 - p_home_gd, 1.0 - p_home_elo
+                else:
+                    continue
+            else:
+                team_norm = row["team_norm"]
+                if team_norm == ht_key:
+                    side = "home"
+                    model_p_raw = p_home
+                    p_xgb, p_gd, p_elo = p_home_xgb, p_home_gd, p_home_elo
+                elif team_norm == at_key:
+                    side = "away"
+                    model_p_raw = 1.0 - p_home
+                    p_xgb, p_gd, p_elo = 1.0 - p_home_xgb, 1.0 - p_home_gd, 1.0 - p_home_elo
+                else:
+                    continue
+
+            american = row.get("american_odds", None)
+            if american is None:
+                continue
+            american = float(american)
+
+            current_implied_p = american_to_prob(american)
+            open_implied_p = float(row.get("open_implied_p", current_implied_p) or current_implied_p)
+
+            # market blend (alpha 높은게 model 더 신뢰)
+            model_p = market_blend_alpha * model_p_raw + (1.0 - market_blend_alpha) * current_implied_p
+            edge = model_p - current_implied_p
+
+            move_size = current_implied_p - open_implied_p
+            abs_move = abs(move_size)
+
+            model_minus_open = model_p_raw - open_implied_p
+            alignment = 1.0 if model_minus_open * move_size >= 0 else -1.0
+
+            market_view = 1 if current_implied_p >= 0.5 else -1
+            model_view = 1 if model_p_raw >= 0.5 else -1
+            is_market_flip = (model_view != market_view) and (abs(model_p_raw - current_implied_p) >= FLIP_GAP_TH)
+
+            signal_tags = []
+            if model_p_raw > current_implied_p:
+                signal_tags.append("value")
+            if is_market_flip:
+                signal_tags.append("market flip")
+            if abs_move > 0:
+                signal_tags.append("with move" if alignment > 0 else "against move")
+
+            signal = ", ".join(signal_tags) if signal_tags else ""
+
+            merged_rows.append(
+                {
+                    "game_id": gid,
+                    "date": g.get("date"),
+                    "home_team": g.get("home_team"),
+                    "away_team": g.get("away_team"),
+                    "side": side,
+                    "team": row.get("team"),
+                    "bookmaker": row.get("bookmaker"),
+                    "american_odds": american,
+
+                    "p_xgb": float(p_xgb),
+                    "p_goal_diff": float(p_gd),
+                    "p_elo": float(p_elo),
+
+                    "model_p_raw": float(model_p_raw),
+                    "model_p": float(model_p),
+                    "implied_p": float(current_implied_p),
+                    "edge": float(edge),
+
+                    "open_implied_p": float(open_implied_p),
+                    "move_size": float(move_size),
+                    "signal": signal,
+                }
+            )
+
+    if not merged_rows:
+        return pd.DataFrame()
+
+    df_out = pd.DataFrame(merged_rows)
+
+    # ✅ best price only: game_id + side 기준 1개만 (implied_p 최소 = payout 최대)
+    df_out["implied_p"] = pd.to_numeric(df_out["implied_p"], errors="coerce")
+    df_out = df_out.sort_values(["game_id", "side", "implied_p"], ascending=[True, True, True])
+    df_out = df_out.drop_duplicates(subset=["game_id", "side"], keep="first").copy()
+
+    df_out.sort_values("edge", ascending=False, inplace=True)
+    return df_out
+
+
+def filter_bets(
+    df: pd.DataFrame,
+    min_edge: float = 0.03,
+    use_bucket_rules: bool = True,      # main 호환용
+    use_strategy_config: bool = True,
+    ban_against_move: bool = True,
+    move_ban_threshold: float = 0.03,
+    flip_against_mode: str = "raise",
+    flip_extra_edge: float = 0.02,
+    **kwargs,
+) -> pd.DataFrame:
+    """
+    move는 "보너스"가 아니라 "방어"로 사용
+    - with move: 그냥 통과(보너스 없음)
+    - against move: 보통은 ban
+    - 단, market flip + against move는 완전 ban하면 flip이 0이 될 수 있으니:
+        - 기본은 "raise" (요구 edge를 더 높여서 통과시키는 방식)
+        - 원하면 "ban"으로 바꿀 수 있음
+    """
+    if df is None or df.empty:
+        return df
+
+    bets = df.copy()
+    if "edge" not in bets.columns:
+        raise ValueError("filter_bets: need 'edge' column.")
+
+    bets["edge_used"] = bets["edge"]
+
+    if "move_size" not in bets.columns:
+        bets["move_size"] = 0.0
+    if "signal" not in bets.columns:
+        bets["signal"] = ""
+
+    bets["abs_move"] = bets["move_size"].abs()
+    bets["is_against_move"] = bets["signal"].astype(str).str.lower().str.contains("against move")
+    bets["is_market_flip"] = bets["signal"].astype(str).str.lower().str.contains("market flip")
+
+    if "implied_p" not in bets.columns:
+        if "american_odds" in bets.columns:
+            bets["implied_p"] = pd.to_numeric(bets["american_odds"], errors="coerce").map(american_to_prob)
+        else:
+            raise ValueError("filter_bets: need 'implied_p' or 'american_odds' column.")
+
+    bets["odds_bucket"] = bets["implied_p"].astype(float).map(_classify_odds_bucket_by_implied)
+
+    if use_strategy_config:
+        cfg = load_strategy_config()
+        buckets_cfg = cfg.get("odds_buckets", {})
+        market_flip_bonus = float(cfg.get("market_flip_bonus", 0.0))
+
+        req_edges, enabled_flags = [], []
+        for _, row in bets.iterrows():
+            b = row["odds_bucket"]
+            bcfg = buckets_cfg.get(b, {})
+            enabled = bool(bcfg.get("enabled", True))
+            req = float(bcfg.get("min_edge", min_edge))
+
+            if row["is_market_flip"] and market_flip_bonus != 0.0:
+                req = max(0.0, req - market_flip_bonus)
+
+            req_edges.append(req)
+            enabled_flags.append(enabled)
+
+        bets["required_edge"] = req_edges
+        bets["bucket_enabled"] = enabled_flags
+    else:
+        bets["required_edge"] = float(min_edge)
+        bets["bucket_enabled"] = True
+
+    mask = (bets["bucket_enabled"]) & (bets["edge_used"] >= bets["required_edge"])
+
+    if ban_against_move:
+        risky = bets["is_against_move"] & (bets["abs_move"] >= float(move_ban_threshold))
+
+        if flip_against_mode == "ban":
+            mask = mask & (~risky)
+        else:
+            # non-flip risky: ban
+            mask = mask & (~(risky & (~bets["is_market_flip"])))
+
+            # flip+risky: required_edge 강화로 통과 여부 결정
+            flip_risky = risky & bets["is_market_flip"]
+            if flip_risky.any():
+                ok = bets["edge_used"] >= (bets["required_edge"] + float(flip_extra_edge))
+                mask = mask & (~flip_risky | ok)
+
+    return bets[mask].copy()
