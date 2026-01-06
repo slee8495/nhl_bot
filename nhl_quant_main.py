@@ -145,8 +145,18 @@ def main():
         print("[NHL MAIN] No historical games fetched. Abort.")
         return
 
-    raw_games["date"] = pd.to_datetime(raw_games["date"], errors="coerce").dt.date
-    raw_games_past = raw_games[raw_games["date"] < slate_date_pt].copy()
+    time_col = _pick_datetime_col(raw_games)
+    if time_col is None:
+        raise ValueError("[NHL MAIN] raw_games missing datetime column.")
+
+    raw_games["date"] = (
+        pd.to_datetime(raw_games[time_col], utc=True, errors="coerce")
+        .dt.tz_convert(None)
+        .dt.normalize()
+    )
+
+    slate_ts = pd.Timestamp(slate_date_pt)  # 오늘 00:00:00
+    raw_games_past = raw_games[raw_games["date"] < slate_ts].copy()
     if raw_games_past.empty:
         print("[NHL MAIN] No past games before slate_date. Abort.")
         return
