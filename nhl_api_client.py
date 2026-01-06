@@ -134,6 +134,7 @@ class NHLDataClient:
 
 
 
+
     # nhl_api_client.py 안의 NHLDataClient 클래스에 넣기/교체
 
     
@@ -161,7 +162,7 @@ class NHLDataClient:
 
         df = pd.DataFrame(rows)
         if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
         return df
 
 
