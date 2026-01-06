@@ -42,15 +42,14 @@ class OddsAPIClient:
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
         self.api_key = api_key or ODDS_API_KEY
         self.base_url = (base_url or ODDS_API_BASE_URL).rstrip("/")
+
+        # ✅ FIX: The Odds API는 v4 경로가 필요
+        if not self.base_url.endswith("/v4"):
+            self.base_url = self.base_url + "/v4"
+
         if not self.api_key:
             raise ValueError("ODDS_API_KEY is missing. Set it in your .env.")
-
-        self.bdl_key = BALLDONTLIE_API_KEY
-        self.bdl_base = (NHL_BASE_URL or "").rstrip("/")
-        if not self.bdl_key or not self.bdl_base:
-            raise ValueError("BALLDONTLIE_API_KEY / NHL_BASE_URL missing (needed for team mapping).")
-
-        self._team_map_norm_to_abbr: Optional[Dict[str, str]] = None
+    
 
     # -------------------------
     # Odds API
@@ -87,7 +86,7 @@ class OddsAPIClient:
         m: Dict[str, str] = {}
         for t in teams:
             full_name = t.get("full_name") or ""
-            abbr = t.get("abbreviation") or ""
+            abbr = t.get("tricode") or t.get("abbreviation") or ""
             if not abbr:
                 continue
 
@@ -217,8 +216,9 @@ class OddsAPIClient:
                     {
                         "game_id": g.get("id"),
                         "date": d,
-                        "home_team_abbr": (home.get("abbreviation") or "").upper(),
-                        "away_team_abbr": (away.get("abbreviation") or "").upper(),
+                        "home_team_abbr": (home.get("tricode") or home.get("abbreviation") or "").upper(),
+                        "away_team_abbr": (away.get("tricode") or away.get("abbreviation") or "").upper(),
+
                     }
                 )
 
