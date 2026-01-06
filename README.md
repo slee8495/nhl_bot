@@ -31,3 +31,4 @@ nba_bot 보다 1/10 으로 작게 들어가는게 목표인 봇. 왜냐면, 시�
 - odds_client.py (odds_client.py)
 
 
+nhl_quant_main.py 를 nhl_quant_main_next_day.py 처럼 맞춰야 함. 
