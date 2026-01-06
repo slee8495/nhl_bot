@@ -1,3 +1,22 @@
+today_df, feature_cols = build_today_dataset(
+    raw_games_past=raw_games_past,
+    today_games=tomorrow_games,
+    today=slate_date_pt,
+)
+
+---
+
+
+today_df, feature_cols = build_today_dataset(
+    raw_games_past,
+    tomorrow_games,
+    slate_date_pt,
+)
+
+---
+
+
+
 @staticmethod
 def _normalize_game_row(g: Dict[str, Any]) -> Dict[str, Any]:
     home = g.get("home_team") or {}
