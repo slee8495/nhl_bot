@@ -19,7 +19,15 @@ from nhl_performance import update_bet_log_and_summary
 from nhl_strategy_tuning import tune_strategy_from_log
 from email_management import send_nhl_daily_report
 
-from nhl_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
+try:
+    from nhl_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
+    HAS_LINEUP = True
+except ModuleNotFoundError:
+    HAS_LINEUP = False
+    attach_lineup_features = None
+    adjust_prob_with_lineup = None
+    print("[NHL NEXT] nhl_injury_lineup not found -> lineup/injury adjustments disabled.")
+
 
 
 
@@ -127,8 +135,12 @@ def main():
         print("[NHL NEXT] No historical games fetched. Abort.")
         return
 
-    raw_games["date"] = pd.to_datetime(raw_games["date"], errors="coerce")
-    raw_games_past = raw_games[raw_games["date"].dt.date < slate_date_pt].copy()
+    
+    raw_games["date"] = pd.to_datetime(raw_games["date"], errors="coerce").dt.normalize()
+    slate_ts = pd.Timestamp(slate_date_pt)  # 00:00:00
+    raw_games_past = raw_games[raw_games["date"] < slate_ts].copy()
+
+
     if raw_games_past.empty:
         print("[NHL NEXT] No past games before slate_date. Abort.")
         return
@@ -193,11 +205,13 @@ def main():
     scored_games["date"] = slate_date_pt
 
     # ✅ (5.1) Lineup/Injury features + prob adjust (DROP-IN)
-    try:    
-        scored_games = attach_lineup_features(scored_games, today=slate_date_pt)
-        scored_games = adjust_prob_with_lineup(scored_games)
-    except Exception as e:
-        print(f"[NHL NEXT] lineup adjust skipped: {e}")
+    if HAS_LINEUP:
+        try:
+            scored_games = attach_lineup_features(scored_games, today=slate_date_pt)
+            scored_games = adjust_prob_with_lineup(scored_games)
+        except Exception as e:
+            print(f"[NHL NEXT] lineup adjust skipped: {e}")
+
 
 
 
