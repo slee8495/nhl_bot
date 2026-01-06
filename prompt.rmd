@@ -1,4 +1,10 @@
 
+IF INT(SPLIT([Title Suffix], "+", 1)) = 0 THEN "Actual"
+ELSE "Forecast"
+END
+
+--
+
 
 
 IF RIGHT([Month], 3) = "(A)" THEN "Actual"
