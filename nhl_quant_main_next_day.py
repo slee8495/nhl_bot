@@ -167,8 +167,8 @@ def main():
         return
 
     # (2) Schedule 확정 (내일 PT)
-    start_date = slate_date_pt - timedelta(days=3)
-    end_date = slate_date_pt + timedelta(days=3)
+    start_date = slate_date_pt - timedelta(days=7)
+    end_date = slate_date_pt + timedelta(days=7)
 
     sched_df = client.fetch_games_by_date_range_df(
         start_date=start_date,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import List, Dict, Any, Optional, Union
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import time
 
 import requests
@@ -132,6 +132,10 @@ class NHLDataClient:
 
 
 
+    # nhl_api_client.py 안의 NHLDataClient 클래스에 넣기/교체
+
+    
+
     def fetch_games_by_date_range_df(
         self,
         start_date: date,
@@ -139,48 +143,25 @@ class NHLDataClient:
         per_page: int = 100,
     ) -> pd.DataFrame:
         """
-        Fetch all games in [start_date, end_date]
+        Fetch all games in [start_date, end_date] using dates[] (balldontlie NHL spec).
         """
-        start_str = start_date.strftime("%Y-%m-%d")
-        end_str = end_date.strftime("%Y-%m-%d")
-
         rows = []
-        cursor = None
-        page = 1
+        d = start_date
+        while d <= end_date:
+            # ✅ balldontlie NHL: dates[]=YYYY-MM-DD 가 정식
+            day_rows = self.fetch_games_by_date(d=d, per_page=per_page)
+            for g in day_rows:
+                rows.append(g)
+            d += timedelta(days=1)
 
-        while True:
-            params = {"start_date": start_str, "end_date": end_str, "per_page": per_page}
-            if cursor is not None:
-                params["cursor"] = cursor
-            else:
-                params["page"] = page
-
-            data = self._get("/games", params=params)
-            games = data.get("data", []) or []
-            if not games:
-                break
-
-            for g in games:
-                rows.append(self._normalize_game_row(g))
-
-            meta = data.get("meta", {}) or {}
-            next_cursor = meta.get("next_cursor", None)
-
-            if next_cursor is not None:
-                if next_cursor == cursor:
-                    break
-                cursor = next_cursor
-                continue
-
-            total_pages = meta.get("total_pages", page)
-            if page >= total_pages:
-                break
-            page += 1
+        if not rows:
+            return pd.DataFrame()
 
         df = pd.DataFrame(rows)
-        if not df.empty and "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce").dt.tz_convert(None)
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
         return df
+
 
     def fetch_games_by_season(self, seasons: List[int], per_page: int = 100) -> pd.DataFrame:
         """
