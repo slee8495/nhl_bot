@@ -84,7 +84,16 @@ def _add_ensemble_prob(scored_games: pd.DataFrame) -> pd.DataFrame:
 
 
 def _pick_datetime_col(df: pd.DataFrame) -> str | None:
-    for c in ["start_time_utc", "start_time", "commence_time", "scheduled", "game_datetime", "datetime", "date"]:
+    # ✅ slate_date 계산용: "시간이 있는" 컬럼만 허용
+    preferred = [
+        "start_time_utc",
+        "start_time",
+        "commence_time",
+        "scheduled",
+        "game_datetime",
+        "datetime",
+    ]
+    for c in preferred:
         if c in df.columns:
             return c
     return None
@@ -186,11 +195,9 @@ def main():
     sched_df = sched_df.copy()
 
     # ✅ schedule에서 실제 시작시간 컬럼 찾기 (NHL은 start_time_utc가 있는 경우가 많음)
-    time_col_sched = None
-    for c in ["start_time_utc", "start_time", "commence_time", "scheduled", "game_datetime", "datetime", "date", "game_date"]:
-        if c in sched_df.columns:
-            time_col_sched = c
-            break
+    time_col_sched = _pick_datetime_col(sched_df)
+    if time_col_sched is None:
+        raise ValueError("[NHL MAIN] Schedule missing datetime-with-time column (start_time_utc/start_time/etc).")
 
     print("[SCHED DEBUG] time_col picked:", time_col_sched)
     print("[SCHED DEBUG] columns:", list(sched_df.columns))
@@ -223,14 +230,12 @@ def main():
     odds_df_all = odds_df_all.copy()
 
     time_col_odds = None
-    for c in ["start_time", "commence_time", "date"]:
+    for c in ["start_time", "commence_time"]:  # ✅ date 제외
         if c in odds_df_all.columns:
             time_col_odds = c
             break
-
     if time_col_odds is None:
-        print("[NHL MAIN] Odds missing datetime column. Abort.")
-        return
+        raise ValueError("[NHL MAIN] Odds missing start_time/commence_time (datetime-with-time).")
 
     odds_df_all["_dt_utc"] = pd.to_datetime(odds_df_all[time_col_odds], utc=True, errors="coerce")
     odds_df_all["_pt_date"] = odds_df_all["_dt_utc"].dt.tz_convert(tz_pt).dt.date
