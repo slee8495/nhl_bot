@@ -92,29 +92,30 @@ class NHLDataClient:
     @staticmethod
     def _normalize_game_row(g: Dict[str, Any]) -> Dict[str, Any]:
         """
-        balldontlie game dict -> normalized row
-
-        Defensive differences:
-          - away team: away_team or visitor_team
-          - score keys:
-              NBA style: home_team_score / visitor_team_score
-              NHL could be: home_score / away_score / away_team_score etc.
+        balldontlie NHL game dict -> normalized row
+        (NHL Games endpoint uses: game_date, start_time_utc, home_team.tricode, away_team.tricode, game_state)
         """
         home = g.get("home_team") or {}
         away = g.get("away_team") or g.get("visitor_team") or {}
 
+        # scores (defensive)
         home_score = g.get("home_team_score", g.get("home_score"))
         away_score = g.get("away_team_score", g.get("visitor_team_score", g.get("away_score")))
 
+        # ✅ date: NHL uses game_date / start_time_utc (NOT "date")
+        date_raw = g.get("game_date") or g.get("start_time_utc") or g.get("date")
+
         return {
             "game_id": g.get("id"),
-            "date": g.get("date"),
+            "date": date_raw,
             "season": g.get("season"),
 
             "home_team_id": home.get("id"),
             "away_team_id": away.get("id"),
-            "home_team_abbr": home.get("abbreviation"),
-            "away_team_abbr": away.get("abbreviation"),
+
+            # ✅ NHL uses tricode, keep fallback for safety
+            "home_team_abbr": home.get("tricode") or home.get("abbreviation"),
+            "away_team_abbr": away.get("tricode") or away.get("abbreviation"),
 
             "home_team": home.get("full_name"),
             "away_team": away.get("full_name"),
@@ -122,11 +123,14 @@ class NHLDataClient:
             "home_score": home_score,
             "away_score": away_score,
 
-            "status": g.get("status"),
+            # ✅ NHL uses game_state, keep fallback
+            "status": g.get("game_state") or g.get("status"),
             "postseason": g.get("postseason"),
             "period": g.get("period"),
             "time": g.get("time"),
         }
+
+
 
     def fetch_games_by_date_range_df(
         self,
@@ -175,7 +179,7 @@ class NHLDataClient:
 
         df = pd.DataFrame(rows)
         if not df.empty and "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce").dt.tz_convert(None)
         return df
 
     def fetch_games_by_season(self, seasons: List[int], per_page: int = 100) -> pd.DataFrame:
@@ -222,7 +226,7 @@ class NHLDataClient:
 
         df = pd.DataFrame(all_rows)
         if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce").dt.tz_convert(None)
         return df
 
     def fetch_games_by_date(self, d, per_page: int = 100) -> List[Dict[str, Any]]:
@@ -279,5 +283,5 @@ class NHLDataClient:
             return pd.DataFrame()
         df = pd.DataFrame(rows)
         if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce").dt.tz_convert(None)
         return df
