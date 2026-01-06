@@ -1,4 +1,152 @@
 
+from datetime import datetime, timedelta, date
+from zoneinfo import ZoneInfo
+
+
+---
+
+def _pick_datetime_col(df: pd.DataFrame) -> str | None:
+    for c in ["start_time_utc", "start_time", "commence_time", "scheduled", "game_datetime", "datetime", "date"]:
+        if c in df.columns:
+            return c
+    return None
+
+
+def _filter_games_by_pt_slate_date(sched_df: pd.DataFrame, slate_pt_date: date, tz_pt: ZoneInfo) -> pd.DataFrame:
+    df = sched_df.copy()
+    time_col = _pick_datetime_col(df)
+    if time_col is None:
+        raise ValueError("[NBA NEXT] Schedule missing datetime column.")
+
+    df["_dt_utc"] = pd.to_datetime(df[time_col], utc=True, errors="coerce")
+    df["slate_date"] = df["_dt_utc"].dt.tz_convert(tz_pt).dt.date
+
+    out = df[df["slate_date"] == slate_pt_date].copy()
+    out.drop(columns=["_dt_utc"], inplace=True, errors="ignore")
+    return out
+
+
+def _filter_odds_by_pt_slate_date(odds_df_all: pd.DataFrame, slate_pt_date: date, tz_pt: ZoneInfo) -> pd.DataFrame:
+    if odds_df_all is None or odds_df_all.empty:
+        return pd.DataFrame()
+
+    df = odds_df_all.copy()
+    time_col = None
+    for c in ["start_time", "commence_time", "date"]:
+        if c in df.columns:
+            time_col = c
+            break
+    if time_col is None:
+        return pd.DataFrame()
+
+    df["_dt_utc"] = pd.to_datetime(df[time_col], utc=True, errors="coerce")
+    df["_pt_date"] = df["_dt_utc"].dt.tz_convert(tz_pt).dt.date
+
+    out = df[df["_pt_date"] == slate_pt_date].copy()
+    out["date"] = slate_pt_date
+    out.drop(columns=["_dt_utc", "_pt_date"], inplace=True, errors="ignore")
+    return out
+
+
+---
+
+
+tz_pt = ZoneInfo("America/Los_Angeles")
+pt_today = datetime.now(tz_pt).date()
+slate_date_pt = pt_today + timedelta(days=1)  # ✅ PT 기준 "내일"
+print(f"[NBA NEXT] Running (PT) for slate_date={slate_date_pt}")
+
+
+---
+
+print("[NBA NEXT] raw_games columns:", list(raw_games.columns))
+time_col = _pick_datetime_col(raw_games)
+if time_col is None:
+    raise ValueError("[NBA NEXT] raw_games has no datetime-like column to build past games.")
+
+# 표준화: UTC->naive(normalize)로 맞추고 비교 쉽게
+raw_games["date"] = pd.to_datetime(raw_games[time_col], utc=True, errors="coerce").dt.tz_convert(None).dt.normalize()
+
+slate_ts = pd.Timestamp(slate_date_pt)  # 00:00:00
+raw_games_past = raw_games[raw_games["date"] < slate_ts].copy()
+
+if raw_games_past.empty:
+    print("[NBA NEXT] No past games before slate_date. Abort.")
+    return
+
+
+---
+
+start_date = slate_date_pt - timedelta(days=7)
+end_date = slate_date_pt + timedelta(days=7)
+
+sched_df = client.fetch_games_by_date_range_df(start_date=start_date, end_date=end_date, per_page=200)
+if sched_df is None or sched_df.empty:
+    print(f"[NBA NEXT] No scheduled games for {start_date}~{end_date}. Abort.")
+    return
+
+tomorrow_games = _filter_games_by_pt_slate_date(sched_df, slate_date_pt, tz_pt)
+if tomorrow_games.empty:
+    print(f"[NBA NEXT] No games found for PT date={slate_date_pt}. Abort.")
+    return
+
+
+
+---
+
+odds_client = OddsAPIClient()
+
+# ✅ NBA용 fetch 함수명은 네 코드에 맞춰야 함
+# 예: odds_client.fetch_nba_moneyline_odds(...)
+odds_df_all = odds_client.fetch_nba_moneyline_odds(regions="us", attach_game_id=True)
+
+odds_df = _filter_odds_by_pt_slate_date(odds_df_all, slate_date_pt, tz_pt)
+if odds_df.empty:
+    print("[NBA NEXT] Odds empty or not matched to PT slate_date. Abort.")
+    return
+
+# ✅ odds game_id로 slate 확정
+if "game_id" in odds_df.columns:
+    odds_game_ids = odds_df["game_id"].dropna().astype(int).unique().tolist()
+    if "game_id" in tomorrow_games.columns:
+        tomorrow_games = tomorrow_games[tomorrow_games["game_id"].astype(int).isin(odds_game_ids)].copy()
+
+    print(f"[SLATE FIX][NBA NEXT] odds_game_ids={len(odds_game_ids)} | schedule_rows(after odds filter)={len(tomorrow_games)}")
+    if tomorrow_games.empty:
+        print("[SLATE FIX][NBA NEXT] No schedule rows matched odds game_id. Expand schedule date range.")
+        return
+else:
+    print("[NBA NEXT] Odds missing game_id. Abort.")
+    return
+
+
+
+---
+
+
+today_df, feature_cols = build_today_dataset(
+    raw_games_past,
+    tomorrow_games,
+    slate_date_pt,
+)
+if today_df is None or today_df.empty:
+    print("[NBA NEXT] No valid feature rows. Abort.")
+    return
+
+
+---
+
+
+scored_games = model.predict_proba(today_df)
+scored_games["date"] = slate_date_pt
+
+
+---
+
+perf_summary = None
+
+---
+
 
 다음은, 
 지금까지 nhl_quant_main_next_day.py 로 작업했는데, 지금까지 작업했던걸, nba_quant_main.py 에도 적용 시켜야 해. 
