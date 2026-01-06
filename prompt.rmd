@@ -1,4 +1,20 @@
 
+today_df, feature_cols = build_today_dataset(
+    raw_games_past=raw_games_past,
+    today_games=today_games,
+    today=today,
+)
+
+--
+
+today_df, feature_cols = build_today_dataset(
+    raw_games_past,
+    today_games,
+    today,
+)
+
+--
+
 
 def _pick_datetime_col(df: pd.DataFrame) -> str | None:
     # ✅ slate_date 계산용: "시간이 있는" 컬럼만 허용
