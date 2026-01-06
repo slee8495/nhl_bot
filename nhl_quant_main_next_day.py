@@ -285,7 +285,6 @@ def main():
         reco_df=reco_df,
         full_df=edge_df,
         perf_summary=perf_summary,
-        subject_prefix="[NEXT DAY]",
     )
 
 
