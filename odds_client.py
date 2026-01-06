@@ -43,12 +43,22 @@ class OddsAPIClient:
         self.api_key = api_key or ODDS_API_KEY
         self.base_url = (base_url or ODDS_API_BASE_URL).rstrip("/")
 
-        # ✅ FIX: The Odds API는 v4 경로가 필요
+        # ✅ The Odds API는 v4 경로가 필요
         if not self.base_url.endswith("/v4"):
             self.base_url = self.base_url + "/v4"
 
         if not self.api_key:
             raise ValueError("ODDS_API_KEY is missing. Set it in your .env.")
+
+        # ✅ balldontlie NHL (팀 매핑 + game_id attach용)
+        self.bdl_key = BALLDONTLIE_API_KEY
+        self.bdl_base = (NHL_BASE_URL or "").rstrip("/")
+        if not self.bdl_key or not self.bdl_base:
+            raise ValueError("BALLDONTLIE_API_KEY / NHL_BASE_URL missing (needed for team mapping).")
+
+        # ✅ 팀 맵 캐시 (이거 없어서 AttributeError 터짐)
+        self._team_map_norm_to_abbr: Optional[Dict[str, str]] = None
+
     
 
     # -------------------------
