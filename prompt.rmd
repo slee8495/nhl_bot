@@ -1,3 +1,39 @@
+
+
+def _pick_datetime_col(df: pd.DataFrame) -> str | None:
+    # ✅ slate_date 계산용: "시간이 있는" 컬럼만 허용
+    preferred = [
+        "start_time_utc",
+        "start_time",
+        "commence_time",
+        "scheduled",
+        "game_datetime",
+        "datetime",
+    ]
+    for c in preferred:
+        if c in df.columns:
+            return c
+    return None
+
+---
+
+time_col_sched = _pick_datetime_col(sched_df)
+if time_col_sched is None:
+    raise ValueError("[NHL MAIN] Schedule missing datetime-with-time column (start_time_utc/start_time/etc).")
+
+---
+time_col_odds = None
+for c in ["start_time", "commence_time"]:  # ✅ date 제외
+    if c in odds_df_all.columns:
+        time_col_odds = c
+        break
+if time_col_odds is None:
+    raise ValueError("[NHL MAIN] Odds missing start_time/commence_time (datetime-with-time).")
+
+---
+
+
+
 여전히 오늘께 안잡히고, 내일께 잡혀. 
 
 아래 두 파일을 보고 시간을 결정하는 결정적인 차이점이 뭔데 못잡고 있는거야? 
