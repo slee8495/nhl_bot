@@ -1,3 +1,26 @@
+send_nhl_daily_report(
+    reco_df=reco_df,
+    full_df=edge_df,
+    perf_summary=perf_summary,
+    subject_prefix="[NEXT DAY]",
+)
+
+---
+
+send_nhl_daily_report(
+    reco_df=reco_df,
+    full_df=edge_df,
+    perf_summary=perf_summary,
+)
+
+
+
+\--
+
+
+
+
+
 today_df, feature_cols = build_today_dataset(
     raw_games_past=raw_games_past,
     today_games=tomorrow_games,
