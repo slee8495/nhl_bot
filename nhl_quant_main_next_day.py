@@ -212,9 +212,9 @@ def main():
 
     # (4) Build features
     today_df, feature_cols = build_today_dataset(
-        raw_games_past=raw_games_past,
-        today_games=tomorrow_games,
-        today=slate_date_pt,
+        raw_games_past,
+        tomorrow_games,
+        slate_date_pt,
     )
     if today_df is None or today_df.empty:
         print("[NHL NEXT] No valid feature rows. Abort.")
