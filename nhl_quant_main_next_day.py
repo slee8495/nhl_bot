@@ -127,8 +127,8 @@ def main():
         print("[NHL NEXT] No historical games fetched. Abort.")
         return
 
-    raw_games["date"] = pd.to_datetime(raw_games["date"], errors="coerce").dt.date
-    raw_games_past = raw_games[raw_games["date"] < slate_date_pt].copy()
+    raw_games["date"] = pd.to_datetime(raw_games["date"], errors="coerce")
+    raw_games_past = raw_games[raw_games["date"].dt.date < slate_date_pt].copy()
     if raw_games_past.empty:
         print("[NHL NEXT] No past games before slate_date. Abort.")
         return
