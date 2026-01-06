@@ -91,31 +91,33 @@ class NHLDataClient:
 
     @staticmethod
     def _normalize_game_row(g: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        balldontlie NHL game dict -> normalized row
-        (NHL Games endpoint uses: game_date, start_time_utc, home_team.tricode, away_team.tricode, game_state)
-        """
         home = g.get("home_team") or {}
         away = g.get("away_team") or g.get("visitor_team") or {}
 
-        # scores (defensive)
         home_score = g.get("home_team_score", g.get("home_score"))
         away_score = g.get("away_team_score", g.get("visitor_team_score", g.get("away_score")))
 
-        # ✅ date: NHL uses game_date / start_time_utc (NOT "date")
-        date_raw = g.get("game_date") or g.get("start_time_utc") or g.get("date")
+        game_date = g.get("game_date")  # "YYYY-MM-DD"
+        start_time_utc = g.get("start_time_utc")  # "YYYY-MM-DDTHH:MM:SSZ"
 
         return {
             "game_id": g.get("id"),
-            "date": date_raw,
+
+            # ✅ 핵심: slate 계산용은 start_time_utc
+            "start_time_utc": start_time_utc,
+            # ✅ 보조: 날짜만 필요한 곳(디버그/표시/필터)용
+            "game_date": game_date,
+
+            # (기존 호환용) date는 start_time_utc 우선으로 둬도 됨
+            "date": start_time_utc or game_date,
+
             "season": g.get("season"),
 
             "home_team_id": home.get("id"),
             "away_team_id": away.get("id"),
 
-            # ✅ NHL uses tricode, keep fallback for safety
-            "home_team_abbr": home.get("tricode") or home.get("abbreviation"),
-            "away_team_abbr": away.get("tricode") or away.get("abbreviation"),
+            "home_team_abbr": (home.get("tricode") or home.get("abbreviation")),
+            "away_team_abbr": (away.get("tricode") or away.get("abbreviation")),
 
             "home_team": home.get("full_name"),
             "away_team": away.get("full_name"),
@@ -123,12 +125,12 @@ class NHLDataClient:
             "home_score": home_score,
             "away_score": away_score,
 
-            # ✅ NHL uses game_state, keep fallback
             "status": g.get("game_state") or g.get("status"),
             "postseason": g.get("postseason"),
             "period": g.get("period"),
             "time": g.get("time"),
         }
+
 
 
 

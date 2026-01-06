@@ -75,7 +75,7 @@ def _add_ensemble_prob(scored_games: pd.DataFrame) -> pd.DataFrame:
 
 
 def _pick_datetime_col(df: pd.DataFrame) -> str | None:
-    for c in ["start_time", "commence_time", "scheduled", "game_datetime", "datetime", "date"]:
+    for c in ["start_time_utc", "start_time", "commence_time", "scheduled", "game_datetime", "datetime", "date"]:
         if c in df.columns:
             return c
     return None
