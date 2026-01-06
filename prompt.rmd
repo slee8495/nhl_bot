@@ -1,4 +1,85 @@
 
+has_full = full_df is not None and not full_df.empty
+
+---
+
+    # =========================================================
+    # ✅ NHL/NBA 컬럼명 차이 흡수: 여기서 표준 컬럼을 강제로 만든다
+    #   - elig 로직이 p_xgb / model_p / implied_p / american_odds 를 전제로 함
+    # =========================================================
+    def _ensure_col(df: pd.DataFrame, target: str, candidates: list[str]) -> pd.DataFrame:
+        if target in df.columns:
+            return df
+        for c in candidates:
+            if c in df.columns:
+                df[target] = df[c]
+                return df
+        df[target] = np.nan
+        return df
+
+    def _american_to_prob(o):
+        try:
+            o = float(o)
+        except Exception:
+            return np.nan
+        if o > 0:
+            return 100.0 / (o + 100.0)
+        return (-o) / ((-o) + 100.0)
+
+    if has_full:
+        full_df = full_df.copy()
+
+        # --- odds / implied ---
+        full_df = _ensure_col(full_df, "american_odds", ["american_odds", "odds", "moneyline_odds"])
+        full_df["american_odds"] = pd.to_numeric(full_df["american_odds"], errors="coerce")
+
+        # implied_p가 비었으면 american_odds로 계산해서 채움
+        if "implied_p" not in full_df.columns:
+            full_df["implied_p"] = np.nan
+        if full_df["implied_p"].isna().all():
+            full_df["implied_p"] = full_df["american_odds"].apply(_american_to_prob)
+
+        # --- model probabilities ---
+        full_df = _ensure_col(full_df, "p_xgb", ["p_xgb", "p_win_xgb", "win_prob_xgb", "p_win", "p_pred"])
+        full_df["p_xgb"] = pd.to_numeric(full_df["p_xgb"], errors="coerce")
+
+        # model_p가 없으면 p_xgb로 fallback (NHL은 ensemble 컬럼명이 다를 수 있음)
+        full_df = _ensure_col(full_df, "model_p", ["model_p", "p_model", "p_final", "p_ensemble", "p_win"])
+        full_df["model_p"] = pd.to_numeric(full_df["model_p"], errors="coerce")
+        full_df["model_p"] = full_df["model_p"].fillna(full_df["p_xgb"])
+
+
+---
+
+
+
+
+
+
+def _ensure_col(df, target, candidates):
+    if target in df.columns:
+        return df
+    for c in candidates:
+        if c in df.columns:
+            df[target] = df[c]
+            return df
+    df[target] = np.nan
+    return df
+
+if has_full:
+    full_df = full_df.copy()
+    # model probs
+    full_df = _ensure_col(full_df, "p_xgb",    ["p_xgb", "p_win_xgb", "win_prob_xgb", "p_win"])
+    full_df = _ensure_col(full_df, "model_p",  ["model_p", "p_model", "p_final", "p_ensemble", "p_win"])
+    # pricing
+    full_df = _ensure_col(full_df, "american_odds", ["american_odds", "odds", "moneyline_odds"])
+    full_df = _ensure_col(full_df, "implied_p", ["implied_p"])
+
+
+---
+
+
+
 드디어 처음으로 봇은 잘 돌았어. 
 이메일 로직한번 봐줄래? nhl 도 nba 랑 bet 들어가는 로직이 일치하는지? 
 
