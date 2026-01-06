@@ -1,3 +1,105 @@
+
+
+    # =========================
+    # (5) Predict
+    # =========================
+    win_model = NHLQuantModel.load_from_disk()
+    scored_games = win_model.predict_proba(today_df)
+
+    # ✅ downstream merge 안정화: 오늘 날짜로 고정
+    scored_games["date"] = today
+
+    # ✅ (5.1) Lineup/Injury features + prob adjust
+    try:
+        scored_games = attach_lineup_features(scored_games, today=today)
+        scored_games = adjust_prob_with_lineup(scored_games)
+    except Exception as e:
+        print(f"[NHL MAIN] lineup adjust skipped: {e}")
+
+    # ✅ lineup adjust 후에도 날짜 다시 고정 (안전)
+    scored_games["date"] = today
+
+    # (5.2) GoalDiff 모델 merge
+    try:
+        gd_model = NHLGoalDiffModel.load_from_disk()
+        gd_df = gd_model.predict_goal_diff(today_df)
+
+        merge_cols = ["game_id", "goal_diff_pred", "p_home_win_from_goal_diff", "p_home_win_from_margin"]
+        merge_cols = [c for c in merge_cols if c in gd_df.columns]
+
+        if merge_cols:
+            scored_games = scored_games.merge(gd_df[merge_cols], on="game_id", how="left")
+    except Exception as e:
+        print(f"[NHL MAIN] GoalDiff model failed or missing: {e}")
+
+    # (5.3) Ensemble
+    try:
+        scored_games = _add_ensemble_prob(scored_games)
+    except Exception as e:
+        print(f"[NHL MAIN] Ensemble failed: {e}")
+
+    # =========================
+    # (6) Edge + filter
+    # =========================
+    edge_df = add_edge_from_odds(
+        scored_games=scored_games,
+        odds_df=odds_df,
+        preferred_bookmaker=None,
+        market_blend_alpha=0.7,
+        odds_history_df=None,
+    )
+
+    if edge_df is None or edge_df.empty:
+        print("[NHL MAIN] Could not match any odds to games. Abort.")
+        return
+
+    reco_df = filter_bets(
+        edge_df,
+        min_edge=0.03,
+        use_bucket_rules=True,
+        use_strategy_config=True,
+    )
+
+    # =========================
+    # (7) Performance log + tune
+    # =========================
+    try:
+        _, perf_summary = update_bet_log_and_summary(
+            reco_df=reco_df,
+            raw_games_past=raw_games_past,
+            today=today,              # ✅ 여기 today
+            stake_per_bet=100.0,
+        )
+    except Exception as e:
+        print(f"[NHL MAIN] performance update failed: {e}")
+        perf_summary = None
+
+    try:
+        tune_strategy_from_log()
+    except Exception as e:
+        print(f"[NHL MAIN] strategy tuning failed: {e}")
+
+    # =========================
+    # (8) Email
+    # =========================
+    send_nhl_daily_report(
+        reco_df=reco_df,
+        full_df=edge_df,
+        perf_summary=perf_summary,
+    )
+
+--
+
+today_games = sched_df[sched_df["game_id"].astype(int).isin(odds_game_ids)].copy()
+
+--
+
+today_games = today_games[today_games["game_id"].astype(int).isin(odds_game_ids)].copy()
+
+--
+
+
+
 # nhl_quant_main.py
 
 from __future__ import annotations
