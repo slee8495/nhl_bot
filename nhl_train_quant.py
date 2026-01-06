@@ -31,7 +31,7 @@ def get_training_seasons_nhl(n_seasons: int = 3) -> list[int]:
 
 
 def main():
-    seasons = get_training_seasons_nhl(n_seasons=3)
+    seasons = get_training_seasons_nhl(n_seasons=2)
     print(f"[NHL TRAIN] Fetching games for seasons: {seasons}")
 
     client = NHLDataClient()
@@ -55,12 +55,13 @@ def main():
     # =========================
     win_model = NHLQuantModel()
     win_eval = win_model.train_walkforward(
-        train_df=train_df,
+        train_df,                 # ✅ train_df를 positional로 전달 (키워드 제거)
         feature_cols=feature_cols,
         n_splits=5,
-        half_life_days=None,  # 처음은 OFF
+        half_life_days=None,      # 처음은 OFF
         save=True,
     )
+
 
     print(
         f"[NHL TRAIN] Win model saved. n_games={win_eval['n_games']}, "
@@ -72,12 +73,13 @@ def main():
     # =========================
     gd_model = NHLGoalDiffModel()
     gd_eval = gd_model.train_walkforward(
-        train_df=train_df,
+        train_df,                 # ✅ train_df를 positional로 전달 (키워드 제거)
         feature_cols=feature_cols,
         n_splits=5,
         half_life_days=None,
         save=True,
     )
+
 
     print(
         f"[NHL TRAIN] GoalDiff model saved. n_games={gd_eval['n_games']}, "
