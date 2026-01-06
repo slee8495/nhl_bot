@@ -64,8 +64,8 @@ def main():
 
 
     print(
-        f"[NHL TRAIN] Win model saved. n_games={win_eval['n_games']}, "
-        f"mean_auc={win_eval['mean_auc']:.4f}, mean_logloss={win_eval['mean_logloss']:.4f}"
+        f"[NHL TRAIN] Win model saved. n_games={win_eval.n_games}, "
+        f"mean_auc={win_eval.mean_auc:.4f}, mean_logloss={win_eval.mean_logloss:.4f}"
     )
 
     # =========================
@@ -82,10 +82,11 @@ def main():
 
 
     print(
-        f"[NHL TRAIN] GoalDiff model saved. n_games={gd_eval['n_games']}, "
-        f"mean_mae={gd_eval['mean_mae']:.3f}, mean_rmse={gd_eval['mean_rmse']:.3f}, "
-        f"residual_std={gd_eval['residual_std']:.3f}"
+        f"[NHL TRAIN] GoalDiff model saved. n_games={gd_eval.n_games}, "
+        f"mean_mae={gd_eval.mean_mae:.3f}, mean_rmse={gd_eval.mean_rmse:.3f}, "
+        f"residual_std={gd_eval.residual_std:.3f}"
     )
+
 
 
 if __name__ == "__main__":
