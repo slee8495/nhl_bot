@@ -1,24 +1,32 @@
 
-IF INT(SPLIT([Title Suffix], "+", 1)) = 0 THEN "Actual"
-ELSE "Forecast"
-END
 
---
+그렇게 작동 안하는데?
+Jan
+Feb
+Mar
+Apr
+May
+Jun
+Jul
+Aug
+Sep
+Oct
+Nov
+Dec
 
+이런 경우에 만약에 Title Suffix 가 3+9 이면
 
+Actual
+Actual
+Actual
+Forecast
+Forecast
+Forecast
+Forecast
+Forecast
+Forecast
+Forecast
+Forecast
+Forecast
 
-IF RIGHT([Month], 3) = "(A)" THEN "Actual"
-ELSE "Forecast"
-END
-
-이거를 내가 좀 바꾸고, 싶은데, 
-Month 는 Jan, Feb, 이런식이고. 
-Title Suffix 는 0+12, 1+11 이런식이거든? 
-
-Jan 은, 0+12
-Feb 는, 1+11
-Mar 는, 2+10
-
-이런식이야. 
-
-이걸 이용해서. 저 포뮬라가 작동해서 Actual 도 이제 가질 수 있게 해줄 수 있겠어? 
+이렇게 되어야 하잖아. 
