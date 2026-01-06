@@ -22,8 +22,7 @@ from email_management import send_nhl_daily_report
 from nhl_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
 
 
-from datetime import datetime, timedelta, date
-from zoneinfo import ZoneInfo
+
 
 
 # -----------------------------
@@ -95,7 +94,7 @@ def _filter_games_by_pt_slate_date(sched_df: pd.DataFrame, slate_pt_date: date, 
     df = sched_df.copy()
     time_col = _pick_datetime_col(df)
     if time_col is None:
-        raise ValueError("[NBA NEXT] Schedule missing datetime column.")
+        raise ValueError("[NHL MAIN] Schedule missing datetime column.")
 
     df["_dt_utc"] = pd.to_datetime(df[time_col], utc=True, errors="coerce")
     df["slate_date"] = df["_dt_utc"].dt.tz_convert(tz_pt).dt.date
