@@ -129,44 +129,50 @@ def _filter_odds_by_pt_slate_date(odds_df_all: pd.DataFrame, slate_pt_date: date
 
 def main():
     tz_pt = ZoneInfo("America/Los_Angeles")
-    slate_date_pt = datetime.now(tz_pt).date()  # ✅ PT 기준 "오늘"
-
-    print(f"[NHL MAIN] Running (PT) for slate_date={slate_date_pt}")
+    today = datetime.now(tz_pt).date()
+    print(f"[NHL MAIN] Running (PT) for date={today}")
 
     client = NHLDataClient()
 
     # =========================
     # (1) Past games (feature base)
-    # - 운영은 최근 1 시즌만(속도)
     # =========================
-    seasons = [slate_date_pt.year - 1]
+    seasons = [today.year - 1]  # 운영용: 최근 1 시즌
     raw_games = client.fetch_games_by_season(seasons)
     if raw_games is None or raw_games.empty:
         print("[NHL MAIN] No historical games fetched. Abort.")
         return
 
-    time_col = _pick_datetime_col(raw_games)
-    if time_col is None:
+    # ✅ NHL past-games 날짜 표준화 (UTC->naive normalize)
+    time_col_hist = None
+    for c in ["start_time_utc", "start_time", "commence_time", "scheduled", "game_datetime", "datetime", "date", "game_date"]:
+        if c in raw_games.columns:
+            time_col_hist = c
+            break
+    if time_col_hist is None:
         raise ValueError("[NHL MAIN] raw_games missing datetime column.")
 
     raw_games["date"] = (
-        pd.to_datetime(raw_games[time_col], utc=True, errors="coerce")
-        .dt.tz_convert(None)
-        .dt.normalize()
+        pd.to_datetime(raw_games[time_col_hist], utc=True, errors="coerce")
+          .dt.tz_convert(None)
+          .dt.normalize()
     )
 
-    slate_ts = pd.Timestamp(slate_date_pt)  # 오늘 00:00:00
-    raw_games_past = raw_games[raw_games["date"] < slate_ts].copy()
+    raw_games_past = raw_games[raw_games["date"] < pd.Timestamp(today)].copy()
     if raw_games_past.empty:
-        print("[NHL MAIN] No past games before slate_date. Abort.")
+        print("[NHL MAIN] No past games before today. Abort.")
         return
 
     # =========================
-    # (2) Schedule 확정 (PT 슬레이트)
-    # - PT 날짜 경계 때문에 ±3일 넉넉히
+    # ✅ SLATE 선택 (NBA MAIN 방식 그대로)
+    # - schedule에서 PT '오늘' 경기만
+    # - odds도 PT '오늘'로만 필터
+    # - 마지막에 odds game_id로 slate 확정
     # =========================
-    start_date = slate_date_pt - timedelta(days=3)
-    end_date = slate_date_pt + timedelta(days=3)
+
+    # (A) schedule 먼저 확정 (UTC/PT 날짜 경계 때문에 ±3일)
+    start_date = today - timedelta(days=3)
+    end_date   = today + timedelta(days=3)
 
     sched_df = client.fetch_games_by_date_range_df(
         start_date=start_date,
@@ -177,40 +183,83 @@ def main():
         print(f"[NHL MAIN] No scheduled games for {start_date}~{end_date}. Abort.")
         return
 
-    today_games = _filter_games_by_pt_slate_date(sched_df, slate_date_pt, tz_pt)
-    if today_games.empty:
-        print(f"[NHL MAIN] No games found for PT date={slate_date_pt}. Abort.")
+    sched_df = sched_df.copy()
+
+    # ✅ schedule에서 실제 시작시간 컬럼 찾기 (NHL은 start_time_utc가 있는 경우가 많음)
+    time_col_sched = None
+    for c in ["start_time_utc", "start_time", "commence_time", "scheduled", "game_datetime", "datetime", "date", "game_date"]:
+        if c in sched_df.columns:
+            time_col_sched = c
+            break
+
+    print("[SCHED DEBUG] time_col picked:", time_col_sched)
+    print("[SCHED DEBUG] columns:", list(sched_df.columns))
+    print("[SCHED DEBUG] time sample:", sched_df[time_col_sched].head(3).tolist() if time_col_sched else None)
+
+    if time_col_sched is None:
+        print("[NHL MAIN] Schedule missing datetime column. Abort.")
         return
 
-    # =========================
-    # (3) Odds (PT 슬레이트)
-    # - 가능하면 game_id로 slate 확정
-    # =========================
+    # ✅ 핵심: schedule 시간을 UTC로 파싱 → PT로 변환 → slate_date
+    sched_df["_dt_utc"] = pd.to_datetime(sched_df[time_col_sched], utc=True, errors="coerce")
+    sched_df["slate_date"] = sched_df["_dt_utc"].dt.tz_convert(tz_pt).dt.date
+
+    print("[SCHED DEBUG] slate_date counts (top):")
+    print(sched_df["slate_date"].value_counts().head(5))
+
+    today_games = sched_df[sched_df["slate_date"] == today].copy()
+    if today_games.empty:
+        print(f"[NHL MAIN] No games found for PT date={today}. Abort.")
+        return
+
+    # (B) odds는 "PT 오늘 하루"만 정확히 필터
     odds_client = OddsAPIClient()
     odds_df_all = odds_client.fetch_nhl_moneyline_odds(regions="us", attach_game_id=True)
 
-    odds_df = _filter_odds_by_pt_slate_date(odds_df_all, slate_date_pt, tz_pt)
-
-    if odds_df.empty:
-        print("[NHL MAIN] Odds empty or not matched to PT slate_date. Abort.")
+    if odds_df_all is None or odds_df_all.empty:
+        print("[NHL MAIN] No odds from API. Abort.")
         return
 
-    # ✅✅✅ odds game_id로 slate 확정 (NBA와 동일)
+    odds_df_all = odds_df_all.copy()
+
+    time_col_odds = None
+    for c in ["start_time", "commence_time", "date"]:
+        if c in odds_df_all.columns:
+            time_col_odds = c
+            break
+
+    if time_col_odds is None:
+        print("[NHL MAIN] Odds missing datetime column. Abort.")
+        return
+
+    odds_df_all["_dt_utc"] = pd.to_datetime(odds_df_all[time_col_odds], utc=True, errors="coerce")
+    odds_df_all["_pt_date"] = odds_df_all["_dt_utc"].dt.tz_convert(tz_pt).dt.date
+
+    odds_df = odds_df_all[odds_df_all["_pt_date"] == today].copy()
+    odds_df["date"] = today
+    odds_df.drop(columns=["_dt_utc", "_pt_date"], inplace=True, errors="ignore")
+
+    if odds_df.empty:
+        print("[NHL MAIN] Odds exist but none matched PT today. Abort.")
+        return
+
+    # ✅✅✅ 핵심: odds에 붙은 game_id로 slate 최종 확정 (NBA와 동일)
     if "game_id" in odds_df.columns:
         odds_game_ids = odds_df["game_id"].dropna().astype(int).unique().tolist()
-        if "game_id" in today_games.columns:
-            today_games = today_games[today_games["game_id"].astype(int).isin(odds_game_ids)].copy()
 
-        print(f"[SLATE FIX][NHL] odds_game_ids={len(odds_game_ids)} | schedule_rows(after odds filter)={len(today_games)}")
+        # 오늘경기(today_games)로 확정하지 말고, odds game_id로 확정
+        today_games = sched_df[sched_df["game_id"].astype(int).isin(odds_game_ids)].copy()
+
+        print(f"[SLATE FIX][NHL] odds_game_ids={len(odds_game_ids)} | today_games(after odds filter)={len(today_games)}")
 
         if today_games.empty:
             print("[SLATE FIX][NHL] No schedule rows matched odds game_id. Expand schedule date range.")
             return
     else:
-        print("[NHL MAIN] Odds missing game_id. Abort.")
+        print("[SLATE FIX][NHL] Odds missing game_id. Abort.")
         return
 
-    print(f"[NHL MAIN] Final slate(PT)={slate_date_pt} | games={today_games['game_id'].nunique()} | odds_rows={len(odds_df)}")
+    print(f"[NHL MAIN] Final slate(PT)={today} | games={today_games['game_id'].nunique()} | odds_rows={len(odds_df)}")
 
     # =========================
     # (4) Build today features
@@ -218,11 +267,13 @@ def main():
     today_df, feature_cols = build_today_dataset(
         raw_games_past=raw_games_past,
         today_games=today_games,
-        today=slate_date_pt,
+        today=today,
     )
     if today_df is None or today_df.empty:
         print("[NHL MAIN] No valid feature rows for today. Abort.")
         return
+
+
 
     # =========================
     # (5) Predict
