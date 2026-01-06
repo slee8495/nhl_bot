@@ -248,7 +248,7 @@ def main():
         odds_game_ids = odds_df["game_id"].dropna().astype(int).unique().tolist()
 
         # 오늘경기(today_games)로 확정하지 말고, odds game_id로 확정
-        today_games = sched_df[sched_df["game_id"].astype(int).isin(odds_game_ids)].copy()
+        today_games = today_games[today_games["game_id"].astype(int).isin(odds_game_ids)].copy()
 
         print(f"[SLATE FIX][NHL] odds_game_ids={len(odds_game_ids)} | today_games(after odds filter)={len(today_games)}")
 
@@ -280,22 +280,21 @@ def main():
     # =========================
     win_model = NHLQuantModel.load_from_disk()
     scored_games = win_model.predict_proba(today_df)
-    
 
-    # downstream merge 안정화
-    scored_games["date"] = slate_date_pt
+    # ✅ downstream merge 안정화: 오늘 날짜로 고정
+    scored_games["date"] = today
 
-    # ✅ (5.1) Lineup/Injury features + prob adjust (DROP-IN)
+    # ✅ (5.1) Lineup/Injury features + prob adjust
     try:
-        scored_games = attach_lineup_features(scored_games, today=slate_date_pt)
+        scored_games = attach_lineup_features(scored_games, today=today)
         scored_games = adjust_prob_with_lineup(scored_games)
     except Exception as e:
         print(f"[NHL MAIN] lineup adjust skipped: {e}")
 
-    # downstream merge 안정화
-    scored_games["date"] = slate_date_pt
+    # ✅ lineup adjust 후에도 날짜 다시 고정 (안전)
+    scored_games["date"] = today
 
-    # goal diff model (NBA margin model 대응)
+    # (5.2) GoalDiff 모델 merge
     try:
         gd_model = NHLGoalDiffModel.load_from_disk()
         gd_df = gd_model.predict_goal_diff(today_df)
@@ -308,7 +307,7 @@ def main():
     except Exception as e:
         print(f"[NHL MAIN] GoalDiff model failed or missing: {e}")
 
-    # 앙상블(선택이지만 추천)
+    # (5.3) Ensemble
     try:
         scored_games = _add_ensemble_prob(scored_games)
     except Exception as e:
@@ -343,7 +342,7 @@ def main():
         _, perf_summary = update_bet_log_and_summary(
             reco_df=reco_df,
             raw_games_past=raw_games_past,
-            today=slate_date_pt,
+            today=today,              # ✅ 여기 today
             stake_per_bet=100.0,
         )
     except Exception as e:
