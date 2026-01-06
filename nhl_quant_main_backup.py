@@ -22,8 +22,6 @@ from email_management import send_nhl_daily_report
 from nhl_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
 
 
-from datetime import datetime, timedelta, date
-from zoneinfo import ZoneInfo
 
 
 # -----------------------------
@@ -85,17 +83,25 @@ def _add_ensemble_prob(scored_games: pd.DataFrame) -> pd.DataFrame:
 
 
 def _pick_datetime_col(df: pd.DataFrame) -> str | None:
-    for c in ["start_time_utc", "start_time", "commence_time", "scheduled", "game_datetime", "datetime", "date"]:
+    """
+    balldontlie games DF에서 datetime로 쓸 컬럼 탐색.
+    NHL에서도 "date"가 ISO datetime으로 내려오는 케이스가 많아서 date 우선.
+    """
+    for c in ["start_time", "commence_time", "scheduled", "game_datetime", "datetime", "date"]:
         if c in df.columns:
             return c
     return None
 
 
-def _filter_games_by_pt_slate_date(sched_df: pd.DataFrame, slate_pt_date: date, tz_pt: ZoneInfo) -> pd.DataFrame:
+def _filter_games_by_pt_slate_date(
+    sched_df: pd.DataFrame,
+    slate_pt_date: date,
+    tz_pt: ZoneInfo,
+) -> pd.DataFrame:
     df = sched_df.copy()
     time_col = _pick_datetime_col(df)
     if time_col is None:
-        raise ValueError("[NBA NEXT] Schedule missing datetime column.")
+        raise ValueError("[NHL MAIN] Schedule missing datetime column.")
 
     df["_dt_utc"] = pd.to_datetime(df[time_col], utc=True, errors="coerce")
     df["slate_date"] = df["_dt_utc"].dt.tz_convert(tz_pt).dt.date
@@ -105,7 +111,11 @@ def _filter_games_by_pt_slate_date(sched_df: pd.DataFrame, slate_pt_date: date, 
     return out
 
 
-def _filter_odds_by_pt_slate_date(odds_df_all: pd.DataFrame, slate_pt_date: date, tz_pt: ZoneInfo) -> pd.DataFrame:
+def _filter_odds_by_pt_slate_date(
+    odds_df_all: pd.DataFrame,
+    slate_pt_date: date,
+    tz_pt: ZoneInfo,
+) -> pd.DataFrame:
     if odds_df_all is None or odds_df_all.empty:
         return pd.DataFrame()
 
@@ -125,7 +135,6 @@ def _filter_odds_by_pt_slate_date(odds_df_all: pd.DataFrame, slate_pt_date: date
     out["date"] = slate_pt_date
     out.drop(columns=["_dt_utc", "_pt_date"], inplace=True, errors="ignore")
     return out
-
 
 
 def main():
