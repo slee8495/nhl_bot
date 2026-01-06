@@ -129,8 +129,10 @@ def main():
     client = NHLDataClient()
 
     # (1) Past games (최근 1 시즌)
-    seasons = [pt_today.year - 1]
+    seasons = [pt_today.year - 2, pt_today.year - 1]
     raw_games = client.fetch_games_by_season(seasons)
+    print("[NHL NEXT] raw_games date min/max:", raw_games["date"].min(), raw_games["date"].max())
+
     if raw_games is None or raw_games.empty:
         print("[NHL NEXT] No historical games fetched. Abort.")
         return
