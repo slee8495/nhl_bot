@@ -131,6 +131,25 @@ def main():
     # (1) Past games (최근 1 시즌)
     seasons = [pt_today.year - 2, pt_today.year - 1]
     raw_games = client.fetch_games_by_season(seasons)
+    
+    # ✅ date 컬럼이 실제로 뭔지 확인하고, 없으면 대체 컬럼 사용
+    print("[NHL NEXT] raw_games columns:", list(raw_games.columns))
+    print("[NHL NEXT] raw_games date sample:", raw_games.get("date", pd.Series(dtype=object)).head(5).tolist())
+
+    # ✅ NHL raw_games는 'date'가 아닐 수 있으니 가능한 datetime 컬럼을 찾아서 표준화
+    time_col = None
+    for c in ["date", "start_time", "commence_time", "scheduled", "game_datetime", "datetime"]:
+        if c in raw_games.columns:
+            time_col = c
+            break
+    if time_col is None:
+        raise ValueError("[NHL NEXT] raw_games has no datetime-like column to build past games.")
+
+    raw_games["date"] = pd.to_datetime(raw_games[time_col], utc=True, errors="coerce").dt.tz_convert(None).dt.normalize()
+    print("[NHL NEXT] parsed date min/max:", raw_games["date"].min(), raw_games["date"].max())
+
+
+
     print("[NHL NEXT] raw_games date min/max:", raw_games["date"].min(), raw_games["date"].max())
 
     if raw_games is None or raw_games.empty:
@@ -138,7 +157,7 @@ def main():
         return
 
     
-    raw_games["date"] = pd.to_datetime(raw_games["date"], errors="coerce").dt.normalize()
+    
     slate_ts = pd.Timestamp(slate_date_pt)  # 00:00:00
     raw_games_past = raw_games[raw_games["date"] < slate_ts].copy()
 
