@@ -265,7 +265,16 @@ def send_nhl_daily_report(
         req_edge_flip = np.where(is_plus200, EDGE_MIN_FLIP_PLUS200, EDGE_MIN_FLIP)
         req_edge = np.where(flip, req_edge_flip, req_edge_normal)
 
+        EDGE_FLOOR = -3.0  # ✅ -3%까지 허용 (원하면 -2.0)
         elig = (edgep >= req_edge) & base_prob_ok
+
+        # ✅ 추가: strong-prob인데 edge가 살짝 음수면 허용
+        soft_yes = base_prob_ok & (edgep >= EDGE_FLOOR) & (odds.abs() <= AUTO_YES_MAX_ABS_ODDS)
+
+        if AUTO_YES_ONLY_NON_FLIP:
+            soft_yes = soft_yes & (~flip)
+
+        elig = elig | soft_yes
 
         if UNDERDOG_ONLY:
             elig = elig & (odds > 0)
