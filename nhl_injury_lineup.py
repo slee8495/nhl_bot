@@ -80,6 +80,50 @@ def _resolve_bdl_team_ids_from_tricodes(tricodes: List[str], client: NHLLineupCl
     return out
 
 
+def _attach_bdl_team_ids_to_games(df: pd.DataFrame, bdl_client: "NHLLineupClient") -> pd.DataFrame:
+    """
+    scored_games(df)의 home_team_abbr/away_team_abbr(tricode) -> BDL team_id를 붙인다.
+    결과 컬럼: home_team_id_bdl, away_team_id_bdl
+    """
+    out = df.copy()
+
+    if ("home_team_abbr" not in out.columns) or ("away_team_abbr" not in out.columns):
+        return out
+
+    teams = bdl_client.fetch_teams()
+    if teams is None or teams.empty:
+        return out
+
+    teams = teams.copy()
+    teams["tricode_norm"] = teams["tricode"].apply(_normalize_tricode)
+    teams["team_id_bdl"] = pd.to_numeric(teams["team_id"], errors="coerce").astype("Int64")
+
+    out["home_tricode_norm"] = out["home_team_abbr"].apply(_normalize_tricode)
+    out["away_tricode_norm"] = out["away_team_abbr"].apply(_normalize_tricode)
+
+    # home
+    out = out.merge(
+        teams[["tricode_norm", "team_id_bdl"]].rename(
+            columns={"tricode_norm": "home_tricode_norm", "team_id_bdl": "home_team_id_bdl"}
+        ),
+        on="home_tricode_norm",
+        how="left",
+    )
+
+    # away
+    out = out.merge(
+        teams[["tricode_norm", "team_id_bdl"]].rename(
+            columns={"tricode_norm": "away_tricode_norm", "team_id_bdl": "away_team_id_bdl"}
+        ),
+        on="away_tricode_norm",
+        how="left",
+    )
+
+    out.drop(columns=["home_tricode_norm", "away_tricode_norm"], inplace=True, errors="ignore")
+    return out
+
+
+
 
 # ==========================================================
 # Config
@@ -350,30 +394,24 @@ def build_lineup_table_for_today(
     today: Optional[_date] = None,
     cfg: NHLLineupConfig | None = None,
 ) -> pd.DataFrame:
-    """
-    Output: team-level features
-      - team_id, team_name, season
-      - lineup_depth_score
-      - lineup_missing_star_count
-      - lineup_missing_star_score
-      - goalie_out_flag
-      - goalie_missing_score
-    """
     cfg = cfg or NHLLineupConfig()
     today = today or _date.today()
 
-    # -----------------------------
+    # ✅ client를 먼저 만든다 (아래에서 team_names 매핑 시 client 필요)
+    client = NHLLineupClient()
+
     # season normalize (BDL expects start year)
-    # -----------------------------
     season_bdl = _normalize_bdl_season(season)
 
-    # -----------------------------
-    # NHL은 team_ids 없으면 정확도가 너무 떨어짐 → 스킵 권장
-    # -----------------------------
+    # team_ids 없으면 team_names로 매핑 시도
     if not team_ids:
         if team_names:
-            # name -> id 매핑 시도
             teams_df = client.fetch_teams()
+            if teams_df is None or teams_df.empty:
+                print("[NHL LINEUP] team_ids missing and teams fetch failed -> skip lineup.")
+                return pd.DataFrame()
+
+            teams_df = teams_df.copy()
             teams_df["name_norm"] = teams_df["full_name"].apply(_norm)
 
             want = set(_norm(x) for x in team_names if x)
@@ -387,12 +425,8 @@ def build_lineup_table_for_today(
         else:
             print("[NHL LINEUP] team_ids missing -> skip lineup (NHL needs team_ids).")
             return pd.DataFrame()
-    
-
 
     team_ids = [int(x) for x in team_ids if x is not None]
-
-    client = NHLLineupClient()
 
     # ==========================================================
     # 1) players list (team_ids + season)
@@ -652,127 +686,92 @@ def attach_lineup_features(
     cfg = cfg or NHLLineupConfig()
     df = scored_games.copy()
 
-    # season 결정: nhl은 시즌 year 컬럼이 있을 수 있음
+    # season 결정
     if "season" in df.columns and df["season"].notna().any():
         season = int(pd.to_numeric(df["season"], errors="coerce").dropna().max())
     else:
-        # NHL 시즌은 보통 10월 시작이지만, 여기서는 "현재 연도"를 기본으로.
-        # 너는 nhl_quant_bot에서 season 컨벤션을 이미 잡았으니, 가능하면 season 컬럼을 넣어주는 걸 추천.
         season = int(today.year)
 
-    has_team_ids = ("home_team_id" in df.columns) and ("away_team_id" in df.columns)
+    # ✅ tricode 없으면 lineup 자체 스킵 (NHL은 이름매칭 정확도 낮음)
+    if ("home_team_abbr" not in df.columns) or ("away_team_abbr" not in df.columns):
+        print("[NHL LINEUP] missing home/away tricode -> skip lineup.")
+        return df
 
-    if has_team_ids:
-        # ✅ 핵심: NHLDataClient team_id는 BDL team_id와 다를 수 있음
-        # → schedule의 tricode로 BDL team_id를 재구성
-        if ("home_team_abbr" in df.columns) and ("away_team_abbr" in df.columns):
-            tricodes = pd.unique(pd.concat([df["home_team_abbr"], df["away_team_abbr"]]).dropna()).tolist()
-            tricodes = [str(x) for x in tricodes if str(x).strip()]
+    tricodes = pd.unique(pd.concat([df["home_team_abbr"], df["away_team_abbr"]]).dropna()).tolist()
+    tricodes = [str(x) for x in tricodes if str(x).strip()]
 
-            bdl_client = NHLLineupClient()
-            team_ids_bdl = _resolve_bdl_team_ids_from_tricodes(tricodes, bdl_client)
+    bdl_client = NHLLineupClient()
 
-            if not team_ids_bdl:
-                print("[NHL LINEUP] could not resolve BDL team_ids from tricodes -> skip lineup.")
-                return df
+    # ✅ (1) tricodes -> BDL team_ids
+    team_ids_bdl = _resolve_bdl_team_ids_from_tricodes(tricodes, bdl_client)
+    if not team_ids_bdl:
+        print("[NHL LINEUP] could not resolve BDL team_ids from tricodes -> skip lineup.")
+        return df
 
-            lineup_team = build_lineup_table_for_today(season=season, team_ids=team_ids_bdl, today=today, cfg=cfg)
-        else:
-            # abbr 없으면 fallback (정확도 낮음)
-            teams_today = pd.unique(pd.concat([df.get("home_team", pd.Series()), df.get("away_team", pd.Series())]).dropna()).tolist()
-            lineup_team = build_lineup_table_for_today(season=season, team_names=teams_today, today=today, cfg=cfg)
-    else:
-        teams_today = pd.unique(pd.concat([df["home_team"], df["away_team"]]).dropna()).tolist()
-        lineup_team = build_lineup_table_for_today(season=season, team_names=teams_today, today=today, cfg=cfg)
+    # ✅ (2) df에 home_team_id_bdl / away_team_id_bdl 붙이기 (merge 키)
+    df = _attach_bdl_team_ids_to_games(df, bdl_client)
 
+    # 혹시라도 bdl id가 안 붙으면 스킵
+    if ("home_team_id_bdl" not in df.columns) or ("away_team_id_bdl" not in df.columns):
+        print("[NHL LINEUP] failed to attach home/away BDL team ids -> skip lineup.")
+        return df
+
+    if df["home_team_id_bdl"].isna().any() or df["away_team_id_bdl"].isna().any():
+        # 일부만 NaN이어도 일단 진행은 가능. (coverage는 아래 fail_hard에서 체크)
+        print("[NHL LINEUP] WARNING: some games missing BDL team_id mapping (abbr->id).")
+
+    # ✅ (3) lineup_team 생성 (BDL team_id 기준)
+    lineup_team = build_lineup_table_for_today(season=season, team_ids=team_ids_bdl, today=today, cfg=cfg)
 
     if lineup_team is None or lineup_team.empty:
         print("[NHL LINEUP] lineup_team empty -> skip lineup features.")
         return df
 
     # dtype cleanup
-    if "team_id" in lineup_team.columns:
-        lineup_team["team_id"] = pd.to_numeric(lineup_team["team_id"], errors="coerce").astype("Int64")
+    lineup_team["team_id"] = pd.to_numeric(lineup_team["team_id"], errors="coerce").astype("Int64")
+    df["home_team_id_bdl"] = pd.to_numeric(df["home_team_id_bdl"], errors="coerce").astype("Int64")
+    df["away_team_id_bdl"] = pd.to_numeric(df["away_team_id_bdl"], errors="coerce").astype("Int64")
 
-    # HOME merge
-    if has_team_ids and "team_id" in lineup_team.columns:
-        home_feat = lineup_team.add_suffix("_home")
-        df["home_team_id"] = pd.to_numeric(df["home_team_id"], errors="coerce").astype("Int64")
-        df = df.merge(
-            home_feat[
-                [
-                    "team_id_home",
-                    "lineup_depth_score_home",
-                    "lineup_missing_star_count_home",
-                    "lineup_missing_star_score_home",
-                    "goalie_out_flag_home",
-                    "goalie_missing_score_home",
-                ]
-            ],
-            how="left",
-            left_on="home_team_id",
-            right_on="team_id_home",
-        )
-        df.drop(columns=["team_id_home"], inplace=True, errors="ignore")
-    else:
-        lineup_team["team_name_norm"] = lineup_team["team_name"].apply(_norm)
-        df["home_team_norm"] = df["home_team"].apply(_norm)
-        home_feat = lineup_team.add_suffix("_home").rename(columns={"team_name_norm_home": "home_team_norm"})
-        df = df.merge(
-            home_feat[
-                [
-                    "home_team_norm",
-                    "lineup_depth_score_home",
-                    "lineup_missing_star_count_home",
-                    "lineup_missing_star_score_home",
-                    "goalie_out_flag_home",
-                    "goalie_missing_score_home",
-                ]
-            ],
-            how="left",
-            on="home_team_norm",
-        )
-        df.drop(columns=["home_team_norm"], inplace=True, errors="ignore")
+    # =========================
+    # ✅ MERGE (BDL id로만)
+    # =========================
+    # HOME
+    home_feat = lineup_team.add_suffix("_home")
+    df = df.merge(
+        home_feat[
+            [
+                "team_id_home",
+                "lineup_depth_score_home",
+                "lineup_missing_star_count_home",
+                "lineup_missing_star_score_home",
+                "goalie_out_flag_home",
+                "goalie_missing_score_home",
+            ]
+        ],
+        how="left",
+        left_on="home_team_id_bdl",
+        right_on="team_id_home",
+    )
+    df.drop(columns=["team_id_home"], inplace=True, errors="ignore")
 
-    # AWAY merge
-    if has_team_ids and "team_id" in lineup_team.columns:
-        away_feat = lineup_team.add_suffix("_away")
-        df["away_team_id"] = pd.to_numeric(df["away_team_id"], errors="coerce").astype("Int64")
-        df = df.merge(
-            away_feat[
-                [
-                    "team_id_away",
-                    "lineup_depth_score_away",
-                    "lineup_missing_star_count_away",
-                    "lineup_missing_star_score_away",
-                    "goalie_out_flag_away",
-                    "goalie_missing_score_away",
-                ]
-            ],
-            how="left",
-            left_on="away_team_id",
-            right_on="team_id_away",
-        )
-        df.drop(columns=["team_id_away"], inplace=True, errors="ignore")
-    else:
-        lineup_team["team_name_norm"] = lineup_team["team_name"].apply(_norm)
-        df["away_team_norm"] = df["away_team"].apply(_norm)
-        away_feat = lineup_team.add_suffix("_away").rename(columns={"team_name_norm_away": "away_team_norm"})
-        df = df.merge(
-            away_feat[
-                [
-                    "away_team_norm",
-                    "lineup_depth_score_away",
-                    "lineup_missing_star_count_away",
-                    "lineup_missing_star_score_away",
-                    "goalie_out_flag_away",
-                    "goalie_missing_score_away",
-                ]
-            ],
-            how="left",
-            on="away_team_norm",
-        )
-        df.drop(columns=["away_team_norm"], inplace=True, errors="ignore")
+    # AWAY
+    away_feat = lineup_team.add_suffix("_away")
+    df = df.merge(
+        away_feat[
+            [
+                "team_id_away",
+                "lineup_depth_score_away",
+                "lineup_missing_star_count_away",
+                "lineup_missing_star_score_away",
+                "goalie_out_flag_away",
+                "goalie_missing_score_away",
+            ]
+        ],
+        how="left",
+        left_on="away_team_id_bdl",
+        right_on="team_id_away",
+    )
+    df.drop(columns=["team_id_away"], inplace=True, errors="ignore")
 
     # fail-hard validation (optional)
     if cfg.fail_hard_if_lineup_bad:
