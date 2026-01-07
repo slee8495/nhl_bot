@@ -19,7 +19,14 @@ from nhl_performance import update_bet_log_and_summary
 from nhl_strategy_tuning import tune_strategy_from_log
 from email_management import send_nhl_daily_report
 
-from nhl_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
+try:
+    from nhl_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
+    HAS_LINEUP = True
+except ModuleNotFoundError:
+    HAS_LINEUP = False
+    attach_lineup_features = None
+    adjust_prob_with_lineup = None
+    print("[NHL MAIN] nhl_injury_lineup not found -> lineup/injury adjustments disabled.")
 
 
 
@@ -286,15 +293,49 @@ def main():
     win_model = NHLQuantModel.load_from_disk()
     scored_games = win_model.predict_proba(today_df)
 
+    # ✅ schedule(today_games)에서 팀 메타를 scored_games에 강제 주입
+    need = ["game_id", "season", "home_team_id", "away_team_id", "home_team", "away_team", "home_team_abbr", "away_team_abbr"]
+    have = [c for c in need if c in today_games.columns]
+
+    # (A) scored_games에 같은 이름 컬럼이 이미 있으면 suffix 문제 생김 → 먼저 제거
+    dup_cols = [c for c in need if c != "game_id" and c in scored_games.columns]
+    if dup_cols:
+        scored_games = scored_games.drop(columns=dup_cols, errors="ignore")
+
+    # (B) merge
+    if have:
+        meta = today_games[have].drop_duplicates(subset=["game_id"]).copy()
+        scored_games["game_id"] = pd.to_numeric(scored_games["game_id"], errors="coerce")
+        meta["game_id"] = pd.to_numeric(meta["game_id"], errors="coerce")
+        scored_games = scored_games.merge(meta, on="game_id", how="left")
+
+    # (C) 최소 필수 컬럼 보장 (edge/lineup이 필요)
+    if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
+        # suffix가 생긴 경우까지 커버 (혹시 남아있다면)
+        for side in ["home_team", "away_team"]:
+            if side not in scored_games.columns:
+                if f"{side}_y" in scored_games.columns:
+                    scored_games[side] = scored_games[f"{side}_y"]
+                elif f"{side}_x" in scored_games.columns:
+                    scored_games[side] = scored_games[f"{side}_x"]
+
+    if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
+        raise RuntimeError("[NHL MAIN] scored_games missing home_team/away_team after schedule meta join.")
+
+
+
+
+
     # ✅ downstream merge 안정화: 오늘 날짜로 고정
     scored_games["date"] = today
 
     # ✅ (5.1) Lineup/Injury features + prob adjust
-    try:
-        scored_games = attach_lineup_features(scored_games, today=today)
-        scored_games = adjust_prob_with_lineup(scored_games)
-    except Exception as e:
-        print(f"[NHL MAIN] lineup adjust skipped: {e}")
+    if HAS_LINEUP:
+        try:
+            scored_games = attach_lineup_features(scored_games, today=today)
+            scored_games = adjust_prob_with_lineup(scored_games)
+        except Exception as e:
+            print(f"[NHL MAIN] lineup adjust skipped: {e}")
 
     # ✅ lineup adjust 후에도 날짜 다시 고정 (안전)
     scored_games["date"] = today

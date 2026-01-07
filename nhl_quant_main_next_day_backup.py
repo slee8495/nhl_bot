@@ -225,13 +225,29 @@ def main():
     scored_games = win_model.predict_proba(today_df)
     scored_games["date"] = slate_date_pt
 
-    # ✅ (5.1) Lineup/Injury features + prob adjust (DROP-IN)
-    if HAS_LINEUP:
-        try:
-            scored_games = attach_lineup_features(scored_games, today=slate_date_pt)
-            scored_games = adjust_prob_with_lineup(scored_games)
-        except Exception as e:
-            print(f"[NHL NEXT] lineup adjust skipped: {e}")
+    need = ["game_id", "season", "home_team_id", "away_team_id", "home_team", "away_team", "home_team_abbr", "away_team_abbr"]
+    have = [c for c in need if c in tomorrow_games.columns]
+
+    dup_cols = [c for c in need if c != "game_id" and c in scored_games.columns]
+    if dup_cols:
+        scored_games = scored_games.drop(columns=dup_cols, errors="ignore")
+
+    if have:
+        meta = tomorrow_games[have].drop_duplicates(subset=["game_id"]).copy()
+        scored_games["game_id"] = pd.to_numeric(scored_games["game_id"], errors="coerce")
+        meta["game_id"] = pd.to_numeric(meta["game_id"], errors="coerce")
+        scored_games = scored_games.merge(meta, on="game_id", how="left")
+
+    if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
+        for side in ["home_team", "away_team"]:
+            if side not in scored_games.columns:
+                if f"{side}_y" in scored_games.columns:
+                    scored_games[side] = scored_games[f"{side}_y"]
+                elif f"{side}_x" in scored_games.columns:
+                    scored_games[side] = scored_games[f"{side}_x"]
+
+    if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
+        raise RuntimeError("[NHL NEXT] scored_games missing home_team/away_team after schedule meta join.")
 
 
 
