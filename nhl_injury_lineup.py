@@ -542,6 +542,24 @@ def build_lineup_table_for_today(
     if df_sa.empty:
         print("[NHL LINEUP] season_avgs empty (players+season_stats). Skip lineup.")
         return pd.DataFrame()
+    
+    # ==========================================================
+    # ✅ HARDEN: 반드시 team_id_int를 만든다 (KeyError 방지)
+    # ==========================================================
+    if "team_id" not in df_sa.columns:
+        df_sa["team_id"] = np.nan
+    if "team_name" not in df_sa.columns:
+        df_sa["team_name"] = np.nan
+    if "player_name" not in df_sa.columns:
+        df_sa["player_name"] = np.nan
+    if "is_goalie" not in df_sa.columns:
+        df_sa["is_goalie"] = 0
+
+    df_sa["team_id_int"] = pd.to_numeric(df_sa["team_id"], errors="coerce").fillna(-1).astype(int)
+
+    # ✅ 디버그: 여기서 team_id_int가 실제로 존재/값이 있는지 확인
+    print("[NHL LINEUP DEBUG] df_sa cols has team_id_int:", "team_id_int" in df_sa.columns)
+    print("[NHL LINEUP DEBUG] df_sa team_id_int unique head:", df_sa["team_id_int"].unique()[:10])
 
     # ==========================================================
     # 3) injuries (team_ids 필터) -> inj 정규화
@@ -615,11 +633,17 @@ def build_lineup_table_for_today(
 
     # team filter (team_ids 기반)
     keep = set(int(x) for x in team_ids if x is not None)
+
+    before = len(df_sa)
     df_sa = df_sa[df_sa["team_id_int"].isin(keep)].copy()
+    after = len(df_sa)
+
+    print(f"[NHL LINEUP DEBUG] team filter rows: {before} -> {after} | keep_n={len(keep)}")
 
     if df_sa.empty:
-        print("[NHL LINEUP] season_avgs filtered empty. Skip lineup.")
+        print("[NHL LINEUP] season_avgs filtered empty after team_id_int filter. Skip lineup.")
         return pd.DataFrame()
+
 
     # ==========================================================
     # Build per-team
