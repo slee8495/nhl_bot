@@ -441,8 +441,13 @@ def build_lineup_table_for_today(
 
     client = NHLLineupClient()
 
-    # 1) season averages: API best-effort, fallback CSV
-    season_avg = client.fetch_player_season_avgs(season=season)
+    # team_ids가 있으면 그 팀들만 대상으로 시즌 스탯 구성
+    if team_ids:
+        season_avg = client.fetch_player_season_avgs(season=season, team_ids=team_ids)
+    else:
+        # team_names만 있는 경우: 일단 CSV fallback 우선
+        season_avg = pd.DataFrame()
+        
     if season_avg is None or season_avg.empty:
         season_avg = client.load_csv_season_avgs()
 
