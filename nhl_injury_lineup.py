@@ -14,6 +14,7 @@ import requests
 
 from config import BALLDONTLIE_API_KEY, NHL_BASE_URL, DATA_DIR
 
+print("[NHL LINEUP] LOADED nhl_injury_lineup.py (tricode-mapping build)")
 
 # ==========================================================
 # Utilities
