@@ -293,13 +293,18 @@ def main():
     win_model = NHLQuantModel.load_from_disk()
     scored_games = win_model.predict_proba(today_df)
 
-    # ✅ lineup에 필요한 팀 정보가 scored_games에 없을 수 있음 → today_df에서 복구
-    need_cols = ["game_id", "home_team_id", "away_team_id", "home_team", "away_team", "season"]
-    have_cols = [c for c in need_cols if c in today_df.columns]
+    # ✅ scored_games가 edge/lineup에 필요한 팀 컬럼을 잃어버릴 수 있음
+    # ✅ source-of-truth = today_games (schedule)
+    need = ["game_id", "season", "home_team_id", "away_team_id", "home_team", "away_team", "home_team_abbr", "away_team_abbr"]
+    have = [c for c in need if c in today_games.columns]
 
-    if have_cols:
-        meta = today_df[have_cols].drop_duplicates(subset=["game_id"])
+    if have:
+        meta = today_games[have].drop_duplicates(subset=["game_id"])
         scored_games = scored_games.merge(meta, on="game_id", how="left")
+
+    # ✅ 방어: home/away team은 edge에서 필수
+    if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
+        raise RuntimeError("[NHL MAIN] scored_games missing home_team/away_team after merge (schedule meta join failed).")
 
 
 
