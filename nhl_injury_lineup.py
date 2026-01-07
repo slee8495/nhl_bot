@@ -239,7 +239,148 @@ class NHLLineupClient:
 
         return pd.DataFrame(rows)
         
+client = NHLLineupClient()
 
+# -----------------------------
+# ✅ season 파라미터 normalize
+# -----------------------------
+season_bdl = _normalize_bdl_season(season)
+
+# -----------------------------
+# ✅ team_ids 없으면 NHL에서는 사실상 못함 (name-based는 정확도 낮음)
+# -----------------------------
+if not team_ids:
+    print("[NHL LINEUP] team_ids missing -> skip lineup (NHL needs team_ids).")
+    return pd.DataFrame()
+
+team_ids = [int(x) for x in team_ids if x is not None]
+
+# ==========================================================
+# ✅ 1) players list (team_ids + season)
+# ==========================================================
+players = client.fetch_players(season=season_bdl, team_ids=team_ids)
+if players is None or players.empty:
+    print("[NHL LINEUP] players empty -> skip lineup.")
+    return pd.DataFrame()
+
+# ==========================================================
+# ✅ 2) player season stats (player별 호출)
+# ==========================================================
+rows = []
+for _, p in players.iterrows():
+    pid = _safe_int(p.get("id"))
+    if pid is None:
+        continue
+
+    try:
+        payload = client.fetch_player_season_stats(player_id=pid, season=season_bdl)
+        data = payload.get("data")
+
+        # data가 dict 또는 list일 수 있어 안전 처리
+        if isinstance(data, dict):
+            data = [data]
+        st = (data[0] if (isinstance(data, list) and len(data) > 0) else {}) or {}
+
+        # team info (players 응답에 team dict가 있는 경우가 많음)
+        team = p.get("team") if isinstance(p.get("team"), dict) else {}
+        team_id = _safe_int(team.get("id")) or _safe_int(p.get("team_id"))
+        team_name = team.get("full_name") or team.get("name") or p.get("team_name")
+
+        first = p.get("first_name") or ""
+        last = p.get("last_name") or ""
+        player_name = (f"{first} {last}").strip() or p.get("full_name") or str(pid)
+
+        pos = p.get("position") or ""
+        is_goalie = 1 if _norm(pos) in ("g", "goalie", "goaltender") else 0
+
+        # best-effort stat keys
+        toi = st.get("toi") or st.get("time_on_ice") or st.get("avg_toi") or 0
+        pts = st.get("points") or st.get("pts") or 0
+        g = st.get("goals") or st.get("g") or 0
+        a = st.get("assists") or st.get("a") or 0
+
+        rows.append(
+            {
+                "player_id": pid,
+                "player_name": player_name,
+                "team_id": team_id,
+                "team_name": team_name,
+                "position": pos,
+                "toi": _safe_float(toi, 0.0),
+                "pts": _safe_float(pts, 0.0),
+                "g": _safe_float(g, 0.0),
+                "a": _safe_float(a, 0.0),
+                "is_goalie": int(is_goalie),
+            }
+        )
+
+    except Exception as e:
+        print(f"[NHL LINEUP DEBUG] season_stats failed pid={pid} err={type(e).__name__}: {e}")
+        continue
+
+df_sa = pd.DataFrame(rows)
+if df_sa.empty:
+    print("[NHL LINEUP] season_avgs empty (players+season_stats). Skip lineup.")
+    return pd.DataFrame()
+
+# ==========================================================
+# ✅ 3) injuries (team_ids 필터)
+# ==========================================================
+inj_raw = client.fetch_player_injuries(team_ids=team_ids)
+if inj_raw is None or inj_raw.empty:
+    inj = pd.DataFrame()
+else:
+    # normalize injuries into columns: team_id/team_name/player_name/status
+    inj = inj_raw.copy()
+
+    # balldontlie injuries는 보통 player/team이 nested dict로 들어올 수 있어 안전 처리
+    def _get_player_name(x: Any) -> str:
+        if isinstance(x, dict):
+            fn = x.get("first_name") or ""
+            ln = x.get("last_name") or ""
+            return (f"{fn} {ln}").strip()
+        return ""
+
+    def _get_team_id(x: Any) -> Optional[int]:
+        if isinstance(x, dict):
+            return _safe_int(x.get("id"))
+        return None
+
+    def _get_team_name(x: Any) -> str:
+        if isinstance(x, dict):
+            return x.get("full_name") or x.get("name") or ""
+        return ""
+
+    if "player_name" not in inj.columns:
+        if "player" in inj.columns:
+            inj["player_name"] = inj["player"].apply(_get_player_name)
+        else:
+            inj["player_name"] = ""
+
+    if "team_id" not in inj.columns:
+        if "team" in inj.columns:
+            inj["team_id"] = inj["team"].apply(_get_team_id)
+        else:
+            # 혹시 player dict 안에 team_id가 들어오는 형태도 있어서 fallback
+            if "player" in inj.columns:
+                inj["team_id"] = inj["player"].apply(lambda d: _safe_int(d.get("team_id")) if isinstance(d, dict) else None)
+            else:
+                inj["team_id"] = None
+
+    if "team_name" not in inj.columns:
+        if "team" in inj.columns:
+            inj["team_name"] = inj["team"].apply(_get_team_name)
+        else:
+            inj["team_name"] = ""
+
+    if "status" not in inj.columns:
+        # 어떤 응답은 "injury_status"/"designation"를 쓸 수 있음
+        inj["status"] = inj.get("injury_status", "") if "injury_status" in inj.columns else ""
+
+    # 기존 로직이 기대하는 컬럼들 세팅
+    inj["team_id_int"] = pd.to_numeric(inj["team_id"], errors="coerce").fillna(-1).astype(int)
+    inj["player_name_norm"] = inj["player_name"].apply(_norm)
+    inj["status_out"] = inj["status"].apply(lambda x: _is_out_status(x, cfg))
         
 
 
@@ -341,21 +482,7 @@ def build_lineup_table_for_today(
 
     client = NHLLineupClient()
 
-    # team_ids가 있으면 그 팀들만 대상으로 시즌 스탯 구성
-    if team_ids:
-        season_avg = client.fetch_player_season_avgs(season=season, team_ids=team_ids)
-    else:
-        # team_names만 있는 경우: 일단 CSV fallback 우선
-        season_avg = pd.DataFrame()
-
-    if season_avg is None or season_avg.empty:
-        season_avg = client.load_csv_season_avgs()
-
-    if season_avg is None or season_avg.empty:
-        print("[NHL LINEUP] season_avgs empty (API+CSV). Skip lineup.")
-        return pd.DataFrame()
-
-    df_sa = season_avg.copy()
+    
 
     # normalize + required columns
     for c in ["team_id", "team_name", "player_name", "position"]:
@@ -391,25 +518,7 @@ def build_lineup_table_for_today(
         print("[NHL LINEUP] season_avgs filtered empty. Skip lineup.")
         return pd.DataFrame()
 
-    # 2) injuries today: API best-effort, fallback CSV
-    inj = client.fetch_injuries_today(today)
-    if inj is None or inj.empty:
-        inj = client.load_csv_injuries_today()
-
-    if inj is None:
-        inj = pd.DataFrame()
-
-    # normalize injury fields
-    if not inj.empty:
-        for c in ["team_id", "team_name", "player_name", "position", "status"]:
-            if c not in inj.columns:
-                inj[c] = np.nan
-        if "is_goalie" not in inj.columns:
-            inj["is_goalie"] = inj["position"].apply(lambda x: 1 if _norm(x) in ("g", "goalie", "goaltender") else 0)
-
-        inj["team_id_int"] = pd.to_numeric(inj["team_id"], errors="coerce").fillna(-1).astype(int)
-        inj["player_name_norm"] = inj["player_name"].apply(_norm)
-        inj["status_out"] = inj["status"].apply(lambda x: _is_out_status(x, cfg))
+    
 
     # Build per-team
     out_rows: List[Dict[str, Any]] = []
