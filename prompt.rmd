@@ -1,3 +1,25 @@
+print("[NHL LINEUP DEBUG] lineup cols coverage:",
+      "home_depth=", df["lineup_depth_score_home"].notna().mean() if "lineup_depth_score_home" in df.columns else -1,
+      "away_depth=", df["lineup_depth_score_away"].notna().mean() if "lineup_depth_score_away" in df.columns else -1,
+      "home_star=", df["lineup_missing_star_score_home"].notna().mean() if "lineup_missing_star_score_home" in df.columns else -1,
+      "away_star=", df["lineup_missing_star_score_away"].notna().mean() if "lineup_missing_star_score_away" in df.columns else -1,
+      "home_goalie=", df["goalie_out_flag_home"].notna().mean() if "goalie_out_flag_home" in df.columns else -1,
+      "away_goalie=", df["goalie_out_flag_away"].notna().mean() if "goalie_out_flag_away" in df.columns else -1,
+)
+print("[NHL LINEUP DEBUG] sample row:",
+      df[["home_team_abbr","away_team_abbr","home_team_id_bdl","away_team_id_bdl",
+          "lineup_depth_score_home","lineup_depth_score_away",
+          "lineup_missing_star_score_home","lineup_missing_star_score_away",
+          "goalie_out_flag_home","goalie_out_flag_away"]].head(1).to_dict("records")
+      if all(c in df.columns for c in ["home_team_abbr","away_team_abbr","home_team_id_bdl","away_team_id_bdl",
+                                       "lineup_depth_score_home","lineup_depth_score_away",
+                                       "lineup_missing_star_score_home","lineup_missing_star_score_away",
+                                       "goalie_out_flag_home","goalie_out_flag_away"])
+      else "missing some columns"
+)
+
+\\
+
 
 # ==========================================================
 # 3) injuries (team_ids 필터) -> inj 정규화
