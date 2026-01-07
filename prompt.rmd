@@ -1,3 +1,16 @@
+print("[NHL LINEUP DEBUG] attach_lineup_features called. cols=", list(scored_games.columns))
+print("[NHL LINEUP DEBUG] abbr sample:", scored_games.get("home_team_abbr", pd.Series()).head(3).tolist(),
+      scored_games.get("away_team_abbr", pd.Series()).head(3).tolist())
+print("[NHL LINEUP DEBUG] id sample:", scored_games.get("home_team_id", pd.Series()).head(3).tolist(),
+      scored_games.get("away_team_id", pd.Series()).head(3).tolist())
+
+---
+
+print("[NHL LINEUP DEBUG] tricodes=", tricodes)
+print("[NHL LINEUP DEBUG] team_ids_bdl(from /teams)=", team_ids_bdl)
+
+---
+
 
 def _normalize_tricode(x: Any) -> str:
     s = _norm(x).upper()
