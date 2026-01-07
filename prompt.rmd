@@ -1,3 +1,31 @@
+team_ids = pd.unique(pd.concat([df["home_team_id"], df["away_team_id"]]).dropna()).tolist()
+team_ids = [tid for tid in (_safe_int(x) for x in team_ids) if tid is not None]
+
+
+
+---
+
+raw_ids = pd.concat([df["home_team_id"], df["away_team_id"]], ignore_index=True)
+
+# ✅ robust: "61.0", 61.0, "61" 다 OK
+raw_ids = pd.to_numeric(raw_ids, errors="coerce")
+
+team_ids = (
+    raw_ids.dropna()
+    .astype(int)
+    .drop_duplicates()
+    .tolist()
+)
+
+if not team_ids:
+    print("[NHL LINEUP] team_ids missing after numeric cast -> skip lineup.")
+    return df
+
+lineup_team = build_lineup_table_for_today(season=season, team_ids=team_ids, today=today, cfg=cfg)
+
+
+---
+
 
 def build_lineup_table_for_today(
     season: int,
