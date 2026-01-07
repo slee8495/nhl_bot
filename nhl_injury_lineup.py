@@ -98,31 +98,28 @@ class NHLLineupConfig:
 # ==========================================================
 class NHLLineupClient:
     """
-    balldontlie NHL GOAT 플랜 기준:
-      - GET /players (team_ids[], seasons[])  -> 선수 목록
-      - GET /players/{id}/season_stats?season=YYYY -> 선수 시즌 스탯
-      - GET /player_injuries -> 부상 목록
-    base_url 는 반드시 .../nhl/v1 로 들어와야 한다.
+    balldontlie NHL v1 (GOAT)
+      - GET /teams
+      - GET /players (team_ids[], seasons[])
+      - GET /players/:id/season_stats?season=YYYY
+      - GET /player_injuries
+    Docs: https://api.balldontlie.io/nhl/v1/...  [oai_citation:3‡nhl.balldontlie.io](https://nhl.balldontlie.io/?utm_source=chatgpt.com)
     """
 
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        max_retries: int = 3,
-    ):
+    TEAMS_PATH = "/teams"
+    PLAYERS_PATH = "/players"
+    PLAYER_INJURIES_PATH = "/player_injuries"
+
+    def __init__(self, api_key=None, base_url=None, max_retries=3):
         self.api_key = api_key or BALLDONTLIE_API_KEY
         self.base_url = (base_url or NHL_BASE_URL).rstrip("/")
         self.max_retries = max_retries
-
-    def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not self.api_key:
-            raise RuntimeError("BALLDONTLIE_API_KEY missing (API fetch disabled).")
+            raise ValueError("BALLDONTLIE_API_KEY missing.")
 
-        # path는 '/players' 같은 형태만 허용 (리그 prefix 넣지 말기)
+    def _get(self, path, params=None):
         if not path.startswith("/"):
             path = "/" + path
-
         url = f"{self.base_url}{path}"
         headers = {"Authorization": self.api_key, "Accept": "application/json"}
         params = params or {}
@@ -130,19 +127,15 @@ class NHLLineupClient:
         last_exc = None
         for i in range(self.max_retries):
             try:
-                resp = requests.get(url, params=params, headers=headers, timeout=30)
+                resp = requests.get(url, params=params, headers=headers, timeout=90)
 
                 if resp.status_code == 429:
                     retry_after = resp.headers.get("Retry-After")
-                    try:
-                        wait_sec = int(retry_after) if retry_after is not None else 5 * (2 ** i)
-                    except Exception:
-                        wait_sec = 10
-                    print(f"[NHL LINEUP] 429 rate limit. sleep {wait_sec}s ({i+1}/{self.max_retries})")
+                    wait_sec = int(retry_after) if (retry_after and retry_after.isdigit()) else 5 * (2 ** i)
+                    print(f"[NHL LINEUP] 429 Too Many Requests. Sleep {wait_sec}s ({i+1}/{self.max_retries})")
                     time.sleep(wait_sec)
                     continue
 
-                # GOAT인데도 401/403이면 key/헤더/URL 문제
                 if resp.status_code in (401, 403):
                     raise RuntimeError(f"[NHL LINEUP AUTH] {resp.status_code} {url} | {resp.text[:200]}")
 
@@ -155,189 +148,96 @@ class NHLLineupClient:
 
         raise last_exc
 
-    # -------------------------
-    # CSV fallback loaders
-    # -------------------------
-    @staticmethod
-    def load_csv_season_avgs(path: Optional[str] = None) -> pd.DataFrame:
-        path = path or os.path.join(DATA_DIR, "nhl_player_season_avgs.csv")
-        if not os.path.exists(path):
-            return pd.DataFrame()
-        return pd.read_csv(path)
-
-    @staticmethod
-    def load_csv_injuries_today(path: Optional[str] = None) -> pd.DataFrame:
-        path = path or os.path.join(DATA_DIR, "nhl_injuries_today.csv")
-        if not os.path.exists(path):
-            return pd.DataFrame()
-        return pd.read_csv(path)
-
-    # -------------------------
-    # Cache helpers
-    # -------------------------
-    def _cache_path(self, name: str) -> str:
-        return os.path.join(DATA_DIR, name)
-
-    def _cache_valid(self, fp: str, ttl_hours: int) -> bool:
-        if not os.path.exists(fp):
-            return False
-        age_sec = time.time() - os.path.getmtime(fp)
-        return age_sec <= ttl_hours * 3600
-
-    # -------------------------
-    # API fetchers (NHL)
-    # -------------------------
-    def fetch_players_for_teams(self, team_ids: List[int], season: int) -> pd.DataFrame:
-        """
-        /players?team_ids[]=..&seasons[]=YYYY
-        pagination(meta.next_cursor) 대응
-        """
-        season = _normalize_bdl_season(season)
-
-        # 캐시 (슬레이트 team_ids 조합이 자주 반복되면 좋아짐)
-        key = f"nhl_players_{season}_{'_'.join(map(str, sorted(team_ids)))}.csv"
-        fp = self._cache_path(key)
-        if self._cache_valid(fp, ttl_hours=24):
-            return pd.read_csv(fp)
-
-        rows: List[Dict[str, Any]] = []
+    def fetch_teams(self) -> pd.DataFrame:
+        rows = []
         cursor = None
-
         while True:
-            params: Dict[str, Any] = {"per_page": 100, "seasons[]": season}
-            # requests는 같은 key에 list 넣으면 team_ids[]=1&team_ids[]=2 로 나감
+            params = {"per_page": 100}
+            if cursor is not None:
+                params["cursor"] = cursor
+            data = self._get(self.TEAMS_PATH, params=params)
+            items = data.get("data", []) or []
+            if not items:
+                break
+
+            for t in items:
+                rows.append(
+                    {
+                        "team_id": t.get("id"),
+                        "full_name": t.get("full_name"),
+                        "tricode": t.get("tricode"),
+                        "conference_name": t.get("conference_name"),
+                        "division_name": t.get("division_name"),
+                    }
+                )
+
+            meta = data.get("meta", {}) or {}
+            next_cursor = meta.get("next_cursor")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+
+        return pd.DataFrame(rows)
+
+    def fetch_players(self, season: int, team_ids: list[int]) -> pd.DataFrame:
+        """
+        GET /players?seasons[]=2024&team_ids[]=61...
+        """
+        rows = []
+        cursor = None
+        while True:
+            params = {"per_page": 100, "seasons[]": int(season)}
             params["team_ids[]"] = [int(t) for t in team_ids]
 
             if cursor is not None:
                 params["cursor"] = cursor
 
-            data = self._get("/players", params=params)
-            items = data.get("data") or []
-            rows.extend(items)
-
-            meta = data.get("meta") or {}
-            cursor = meta.get("next_cursor")
-            if not cursor:
+            data = self._get(self.PLAYERS_PATH, params=params)
+            items = data.get("data", []) or []
+            if not items:
                 break
 
-        df = pd.DataFrame(rows)
-        if not df.empty:
-            df.to_csv(fp, index=False)
-        return df
+            rows.extend(items)
+            meta = data.get("meta", {}) or {}
+            next_cursor = meta.get("next_cursor")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
 
-    def fetch_player_season_stats(self, player_id: int, season: int) -> Dict[str, Any]:
-        season = _normalize_bdl_season(season)
-        return self._get(f"/players/{int(player_id)}/season_stats", params={"season": season})
+        return pd.DataFrame(rows)
 
-    def fetch_player_season_avgs(self, season: int, team_ids: List[int]) -> pd.DataFrame:
+    def fetch_player_season_stats(self, player_id: int, season: int) -> dict:
         """
-        우리가 필요한 형태로 reshape:
-          team_id, team_name, player_id, player_name, position, toi, pts, g, a, is_goalie
+        GET /players/:id/season_stats?season=2024  [oai_citation:4‡nhl.balldontlie.io](https://nhl.balldontlie.io/?utm_source=chatgpt.com)
         """
-        season = _normalize_bdl_season(season)
+        return self._get(f"/players/{int(player_id)}/season_stats", params={"season": int(season)})
 
-        # 전체 결과 캐시 (매일 슬레이트 팀 기준)
-        key = f"nhl_season_avgs_{season}_{'_'.join(map(str, sorted(team_ids)))}.csv"
-        fp = self._cache_path(key)
-        if self._cache_valid(fp, ttl_hours=24):
-            return pd.read_csv(fp)
-
-        players = self.fetch_players_for_teams(team_ids=team_ids, season=season)
-        if players is None or players.empty:
-            print("[NHL LINEUP] players empty from API.")
-            return pd.DataFrame()
-
-        # balldontlie players schema: id, first_name, last_name, position, team{ id, full_name, ... }
-        rows: List[Dict[str, Any]] = []
-        for _, p in players.iterrows():
-            pid = _safe_int(p.get("id"))
-            if pid is None:
-                continue
-
-            try:
-                stats_payload = self.fetch_player_season_stats(player_id=pid, season=season)
-                # season_stats는 보통 data가 리스트(팀/시즌별 1개)일 수 있음
-                stats_items = stats_payload.get("data")
-                if isinstance(stats_items, dict):
-                    stats_items = [stats_items]
-                if not stats_items:
-                    stats_items = []
-
-                # players에 team 정보가 있음
-                team = p.get("team") if isinstance(p.get("team"), dict) else {}
-                team_id = _safe_int(team.get("id")) or _safe_int(p.get("team_id"))
-                team_name = team.get("full_name") or team.get("name") or p.get("team_name")
-
-                first = p.get("first_name") or ""
-                last = p.get("last_name") or ""
-                player_name = (f"{first} {last}").strip() or p.get("full_name") or str(pid)
-
-                position = p.get("position") or ""
-                pos_norm = _norm(position)
-                is_goalie = 1 if pos_norm in ("g", "goalie", "goaltender") else 0
-
-                # stats key는 공급자/버전에 따라 조금씩 다를 수 있어 best-effort
-                # 우선 1개(대부분 1개)만 사용
-                st = stats_items[0] if len(stats_items) > 0 else {}
-
-                # TOI는 분 단위 average가 아니라 시즌 total일 수 있음 -> 너 로직은 "rotation proxy"라서
-                # total TOI라도 상대 비교는 의미가 있어. (원하면 나중에 avg로 정규화 가능)
-                toi = (
-                    st.get("toi")
-                    or st.get("time_on_ice")
-                    or st.get("avg_toi")
-                    or 0
-                )
-
-                pts = st.get("pts") or st.get("points") or 0
-                g = st.get("g") or st.get("goals") or 0
-                a = st.get("a") or st.get("assists") or 0
-
-                rows.append(
-                    {
-                        "player_id": pid,
-                        "player_name": player_name,
-                        "team_id": team_id,
-                        "team_name": team_name,
-                        "position": position,
-                        "toi": _safe_float(toi, 0.0),
-                        "pts": _safe_float(pts, 0.0),
-                        "g": _safe_float(g, 0.0),
-                        "a": _safe_float(a, 0.0),
-                        "is_goalie": int(is_goalie),
-                    }
-                )
-
-            except Exception as e:
-                # 여기서 조용히 삼키면 또 원인 파악 어려움 -> 로그 남김
-                print(f"[NHL LINEUP DEBUG] season_stats failed player_id={pid} err={type(e).__name__}: {e}")
-                continue
-
-        df = pd.DataFrame(rows)
-        if not df.empty:
-            df.to_csv(fp, index=False)
-        return df
-
-    def fetch_injuries_today(self, day: _date) -> pd.DataFrame:
+    def fetch_player_injuries(self, team_ids: list[int] | None = None) -> pd.DataFrame:
         """
-        balldontlie NHL: /player_injuries (date 파라미터 없이 전체/현재 부상 리스트 형태)
-        day는 인터페이스 유지용 (로그/캐시 키에만 사용)
+        GET /player_injuries?team_ids[]=...
         """
-        key = f"nhl_injuries_{str(day)}.csv"
-        fp = self._cache_path(key)
-        if self._cache_valid(fp, ttl_hours=6):
-            return pd.read_csv(fp)
+        rows = []
+        cursor = None
+        while True:
+            params = {"per_page": 100}
+            if cursor is not None:
+                params["cursor"] = cursor
+            if team_ids:
+                params["team_ids[]"] = [int(t) for t in team_ids]
 
-        try:
-            data = self._get("/player_injuries", params={"per_page": 100})
-            items = data.get("data") or []
-            df = pd.DataFrame(items)
-            if not df.empty:
-                df.to_csv(fp, index=False)
-            return df
-        except Exception as e:
-            print(f"[NHL LINEUP DEBUG] injuries fetch failed err={type(e).__name__}: {e}")
-            return pd.DataFrame()
+            data = self._get(self.PLAYER_INJURIES_PATH, params=params)
+            items = data.get("data", []) or []
+            if not items:
+                break
+
+            rows.extend(items)
+            meta = data.get("meta", {}) or {}
+            next_cursor = meta.get("next_cursor")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+
+        return pd.DataFrame(rows)
         
 
         
@@ -447,7 +347,7 @@ def build_lineup_table_for_today(
     else:
         # team_names만 있는 경우: 일단 CSV fallback 우선
         season_avg = pd.DataFrame()
-        
+
     if season_avg is None or season_avg.empty:
         season_avg = client.load_csv_season_avgs()
 

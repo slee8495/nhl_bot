@@ -1,7 +1,101 @@
 # nhl_injury_lineup.py
+from __future__ import annotations
 
-from config import BALLDONTLIE_API_KEY, NHL_BASE_URL, DATA_DIR  # ✅ NHL_BASE_URL 사용
+from dataclasses import dataclass
+from typing import Dict, Any, List, Optional
+from datetime import date as _date
+import os
+import time
+import unicodedata
 
+import numpy as np
+import pandas as pd
+import requests
+
+from config import BALLDONTLIE_API_KEY, NHL_BASE_URL, DATA_DIR
+
+
+# ==========================================================
+# Utilities
+# ==========================================================
+def _norm(s: Any) -> str:
+    s = "" if s is None else str(s)
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    return " ".join(s.lower().strip().split())
+
+
+def _safe_int(x) -> Optional[int]:
+    try:
+        if pd.isna(x):
+            return None
+        return int(x)
+    except Exception:
+        return None
+
+
+def _safe_float(x, default=0.0) -> float:
+    try:
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return float(default)
+        return float(x)
+    except Exception:
+        return float(default)
+
+
+def _clip_prob(p: float) -> float:
+    return float(np.clip(p, 0.01, 0.99))
+
+def _normalize_bdl_season(season: int) -> int:
+    """
+    balldontlie NHL season 파라미터는 보통 '시즌 시작 연도'(예: 2024)를 기대.
+    네 봇에서 season이 20252026 같은 형태로 들어올 가능성도 있어서 안전 변환.
+    """
+    s = int(season)
+    if s >= 10_000_000:      # e.g., 20252026
+        return s // 10000    # -> 2025
+    if s >= 1_000_000:       # e.g., 20242025
+        return s // 10000    # -> 2024
+    return s
+
+
+# ==========================================================
+# Config
+# ==========================================================
+@dataclass
+class NHLLineupConfig:
+    min_toi_rotation: float = 12.0
+    top_n_stars: int = 3
+
+    depth_clip_min: float = 0.0
+    depth_clip_max: float = 1.2
+
+    depth_weight: float = 0.15
+    star_penalty: float = 0.20
+    goalie_penalty: float = 0.55
+    goalie_is_star: bool = True
+
+    star_min_toi_for_rank: float = 14.0
+    star_score_clip: float = 3.0
+    star_weight_pts: float = 1.00
+    star_weight_g: float = 1.20
+    star_weight_a: float = 0.80
+
+    goalie_min_toi_for_rank: float = 35.0
+    goalie_score_clip: float = 2.5
+
+    out_keywords: tuple[str, ...] = ("out", "doubtful", "ir", "injured reserve", "suspended")
+
+    fail_hard_if_lineup_bad: bool = False
+    min_team_coverage: float = 0.85
+
+    # API 호출량 줄이기용 캐시
+    cache_dir: str = DATA_DIR
+    cache_ttl_hours: int = 24
+
+
+# ==========================================================
+# Client (API는 "있으면 쓰고, 없으면 CSV로도 동작")
+# ==========================================================
 class NHLLineupClient:
     """
     balldontlie NHL v1 (GOAT)
@@ -144,955 +238,291 @@ class NHLLineupClient:
             cursor = next_cursor
 
         return pd.DataFrame(rows)
-
-
-
-
----
-
-
-client = NHLLineupClient()
-
-# ✅ 1) players list (팀/시즌 필터)
-players = client.fetch_players(season=season, team_ids=team_ids)
-if players.empty:
-    print("[NHL LINEUP] players empty → skip.")
-    return pd.DataFrame()
-
-# ✅ 2) player season stats (player별 호출)
-rows = []
-for _, p in players.iterrows():
-    pid = _safe_int(p.get("id"))
-    if pid is None:
-        continue
-
-    try:
-        payload = client.fetch_player_season_stats(player_id=pid, season=season)
-        data = payload.get("data")
-
-        # data가 dict 또는 list일 수 있어 안전 처리
-        if isinstance(data, dict):
-            data = [data]
-        if not data:
-            data = []
-
-        st = data[0] if data else {}
-
-        team = p.get("team") if isinstance(p.get("team"), dict) else {}
-        team_id = _safe_int(team.get("id")) or _safe_int(p.get("team_id"))
-        team_name = team.get("full_name") or team.get("name")
-
-        first = p.get("first_name") or ""
-        last = p.get("last_name") or ""
-        player_name = (f"{first} {last}").strip()
-
-        pos = p.get("position") or ""
-        is_goalie = 1 if _norm(pos) in ("g", "goalie", "goaltender") else 0
-
-        # ⚠️ NHL season_stats 필드명은 "points/goals/assists/toi" 계열일 가능성이 큼 (best-effort)
-        toi = st.get("toi") or st.get("time_on_ice") or st.get("avg_toi") or 0
-        pts = st.get("points") or st.get("pts") or 0
-        g = st.get("goals") or st.get("g") or 0
-        a = st.get("assists") or st.get("a") or 0
-
-        rows.append({
-            "player_id": pid,
-            "player_name": player_name,
-            "team_id": team_id,
-            "team_name": team_name,
-            "position": pos,
-            "toi": _safe_float(toi, 0.0),
-            "pts": _safe_float(pts, 0.0),
-            "g": _safe_float(g, 0.0),
-            "a": _safe_float(a, 0.0),
-            "is_goalie": int(is_goalie),
-        })
-
-    except Exception as e:
-        print(f"[NHL LINEUP DEBUG] season_stats failed pid={pid} err={type(e).__name__}: {e}")
-        continue
-
-season_avg = pd.DataFrame(rows)
-if season_avg.empty:
-    print("[NHL LINEUP] season_avgs empty (players+season_stats). Skip lineup.")
-    return pd.DataFrame()
-
-# ✅ injuries (팀만 필터)
-inj_df = client.fetch_player_injuries(team_ids=team_ids)
-
---
-
-
-
-음.. 이렇게 접근해보자. 
-
-내가 너 참고하라고 참고용으로만, 잘 작동하는 NBA 버전 줘 볼게. 보고 참고해 볼래? 참고로 지금 올리는 config.py 도 NBA 버전이야. 
-
-===
-
-# config.py
-
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
-
-
-NBA_TOTAL_DAILY_RISK = 107
-
-
-
-# --- Paths ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
-MODEL_DIR = os.path.join(BASE_DIR, "models")
-
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(MODEL_DIR, exist_ok=True)
-
-NBA_TRAIN_PATH = os.path.join(DATA_DIR, "nba_train.csv")
-NBA_TODAY_PATH = os.path.join(DATA_DIR, "nba_today.csv")
-NBA_MODEL_PATH = os.path.join(MODEL_DIR, "nba_xgb_win.pkl")
-NBA_MARGIN_MODEL_PATH = os.path.join(MODEL_DIR, "nba_xgb_margin.pkl")
-
-# --- Email ---
-EMAIL_HOST = os.getenv("EMAIL_HOST")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
-EMAIL_USER = os.getenv("EMAIL_USER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_TO = os.getenv("EMAIL_TO")
-
-# --- Sports / Odds API (예: The Odds API) ---
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
-ODDS_API_BASE_URL = os.getenv("ODDS_API_BASE_URL")
-
-# --- Stats API (예: balldontlie for NBA) ---
-BALLDONTLIE_API_KEY = os.getenv("BALLDONTLIE_API_KEY", "")
-BALLDONTLIE_BASE_URL = os.getenv("BALLDONTLIE_BASE_URL")
-NBA_BASE_URL = f"{BALLDONTLIE_BASE_URL}/nba/v1"
-
-
-
-
-
-def _get_float_env(name: str, default: float) -> float:
-    raw = os.getenv(name, "")
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        # 로그 찍고 default 쓰고 싶으면 여기서 print 한 줄 추가해도 됨
-        return default
-
-
-
-
-
-======
-
-# nba_injury_lineup.py
-
-from __future__ import annotations
-from dataclasses import dataclass
-from typing import Dict, Any, List, Optional
-from datetime import date as _date
-import time
-
-import numpy as np
-import pandas as pd
-import requests
-
-import unicodedata
-
-from config import BALLDONTLIE_API_KEY, BALLDONTLIE_BASE_URL
-
-
-def _chunked(lst: List[Any], n: int) -> List[List[Any]]:
-    for i in range(0, len(lst), n):
-        yield lst[i:i+n]
-
-
-@dataclass
-class NBALineupConfig:
-    min_minutes_rotation: float = 10.0   # 시즌 평균 10분 이상 → 로테이션으로 간주
-    top_n_stars: int = 2                 # 팀 내 상위 득점자 몇 명을 "star"로 볼지
-    depth_clip_min: float = 0.0
-    depth_clip_max: float = 1.2          # 완전 건강하면 ~1.0, 가끔 1.1~1.2 허용
-    # lineups → 확률 조정에 쓰는 가중치
-    depth_weight: float = 0.20           # 깊이 차이 1.0 → 로짓에 +0.20 정도
-    star_penalty: float = 0.18           # 스타 1명 결장 → 로짓 -0.10 정도
-    
-    # ✅ NEW: "스타가 누구냐"를 점수로 판단하기 위한 설정
-    star_min_minutes_for_rank: float = 18.0     # 스타 후보로 고려할 최소 평균 출전시간
-    star_score_clip: float = 3.0                # 한 선수의 star_score 상한(로짓 폭주 방지)
-    star_weight_pts: float = 1.00
-    star_weight_ast: float = 0.70
-    star_weight_reb: float = 0.35
-    star_weight_net: float = 0.08               # net_rating 반영 가중치(있으면 보너스)
-
-
-    # 🔥 NEW: 오늘 라인업 기준 net rating 영향력
-    lineup_net_weight: float = 0.15      # net_rating 차이 1점 → 로짓에 +0.15 정도 (원하면 튜닝)
-    
-    # ✅ FAIL-HARD 옵션
-    fail_hard_if_lineup_bad: bool = True
-    min_team_coverage: float = 0.90          # 홈/원정 조인 성공률 최소
-    min_nonzero_net_share: float = 0.30      # net_rating_today가 0이 아닌 비율 최소
-
-
-
-class NBALineupClient:
-    """
-    balldontlie v1 / nba v1 엔드포인트를 이용해서
-      - 팀 목록 (/v1/teams)
-      - 시즌 평균 (/nba/v1/season_averages/general?...)
-      - active players (/v1/players/active)
-      - 부상 정보 (/v1/player_injuries)
-    를 가져오는 클라이언트.
-
-    ※ 중요 포인트
-      - Authorization 헤더: "Authorization: YOUR_API_KEY" (Bearer 아님)
-      - season_averages: /nba/v1/season_averages/<category>
-                         + stats 딕셔너리 안에서 min, pts, reb, ast 추출
-    """
-
-    # ------- v1 / nba v1 path -------
-
-    TEAMS_PATH = "/v1/teams"
-    ACTIVE_PLAYERS_PATH = "/v1/players/active"
-    PLAYER_INJURIES_PATH = "/v1/player_injuries"
-
-    # season averages: category = general, type = base, season_type = regular
-    # → /nba/v1/season_averages/general?season=2024&season_type=regular&type=base
-
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        max_retries: int = 3,
-    ):
-        self.api_key = api_key or BALLDONTLIE_API_KEY
-        self.base_url = (base_url or BALLDONTLIE_BASE_URL).rstrip("/")
-        self.max_retries = max_retries
-
-        if not self.api_key:
-            raise ValueError("BALLDONTLIE_API_KEY is missing. Set it in your .env.")
-
-    def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        url = f"{self.base_url}{path}"
-        # ✅ 공식 문서대로 Bearer 없이 바로 키 사용
-        headers = {
-            "Authorization": self.api_key,
-            "Accept": "application/json",
-        }
-        params = params or {}
-
-        for i in range(self.max_retries):
-            resp = requests.get(url, params=params, headers=headers, timeout=90)
-
-            # 레이트 리밋
-            if resp.status_code == 429:
-                retry_after = resp.headers.get("Retry-After")
-                if retry_after is not None:
-                    try:
-                        wait_sec = int(retry_after)
-                    except ValueError:
-                        wait_sec = 10
-                else:
-                    wait_sec = 5 * (2 ** i)
-
-                print(
-                    f"[NBA LINEUP] 429 Too Many Requests. "
-                    f"Sleep {wait_sec}s and retry ({i+1}/{self.max_retries})..."
-                )
-                time.sleep(wait_sec)
-                continue
-
-            resp.raise_for_status()
-            return resp.json()
-
-        resp.raise_for_status()
-
-    # ------------------ raw fetch들 ------------------
-
-    def fetch_teams(self) -> pd.DataFrame:
-        """
-        GET /v1/teams
-        """
-        rows: List[Dict[str, Any]] = []
-        cursor: Optional[int] = None
-
-        while True:
-            params: Dict[str, Any] = {"per_page": 100}
-            if cursor is not None:
-                params["cursor"] = cursor
-
-            data = self._get(self.TEAMS_PATH, params=params)
-            items = data.get("data", [])
-            if not items:
-                break
-
-            for t in items:
-                rows.append(
-                    {
-                        "team_id": t.get("id"),
-                        "full_name": t.get("full_name"),
-                        "abbreviation": t.get("abbreviation"),
-                        "city": t.get("city"),
-                        "conference": t.get("conference"),
-                        "division": t.get("division"),
-                    }
-                )
-
-            meta = data.get("meta", {}) or {}
-            next_cursor = meta.get("next_cursor")
-            if not next_cursor or next_cursor == cursor:
-                break
-            cursor = next_cursor
-
-        return pd.DataFrame(rows)
-
-    def fetch_season_averages(
-        self,
-        season: int,
-        team_ids: Optional[List[int]] = None,
-    ) -> pd.DataFrame:
-        rows: List[Dict[str, Any]] = []
-
-        candidate_paths = [
-            "/nba/v1/season_averages/general",
-            "/v1/season_averages/general",
-        ]
-
-        for path in candidate_paths:
-            rows.clear()
-            cursor: Optional[int] = None
-
-            try:
-                while True:
-                    params: Dict[str, Any] = {
-                        "season": season,
-                        "season_type": "regular",
-                        "type": "advanced",
-                        "per_page": 100,
-                    }
-                    if cursor is not None:
-                        params["cursor"] = cursor
-
-                    data = self._get(path, params=params)
-                    items = data.get("data", [])
-                    if not items:
-                        break
-
-                    for s in items:
-                        player = s.get("player", {}) or {}
-                        stats = s.get("stats", {}) or {}
-
-                        # ===== NET RAW DEBUG (ADD HERE) =====
-                        if len(rows) < 5:  # 처음 5명만 찍어서 로그 폭발 방지
-                            keys = list(stats.keys())
-                            print("[NET RAW DEBUG] stats keys sample:", keys[:40])
-                            print(
-                                "[NET RAW DEBUG] net fields:",
-                                "net_rating=", stats.get("net_rating"),
-                                "netrtg=", stats.get("netrtg"),
-                                "nrtg=", stats.get("nrtg"),
-                                "ortg=", stats.get("ortg"),
-                                "drtg=", stats.get("drtg"),
-                            )
-                        # ====================================
-
-                        net_raw = (
-                            stats.get("net_rating")
-                            or stats.get("netrtg")
-                            or stats.get("nrtg")
-                            or 0
-                        )
-
-                        rec = {
-                            "player_id": player.get("id"),
-                            "player_name": f"{player.get('first_name', '')} {player.get('last_name', '')}".strip(),
-                            "team_id": player.get("team_id"),
-                            "min": float(stats.get("min", 0) or 0),
-                            "pts": float(stats.get("pts", 0) or 0),
-                            "reb": float(stats.get("reb", 0) or 0),
-                            "ast": float(stats.get("ast", 0) or 0),
-                            "net_rating": float(net_raw or 0),
-                        }
-                        rows.append(rec)
-
-
-                    meta = data.get("meta", {}) or {}
-                    next_cursor = meta.get("next_cursor")
-                    if not next_cursor or next_cursor == cursor:
-                        break
-                    cursor = next_cursor
-
-                if rows:
-                    break
-
-            except requests.HTTPError as e:
-                if e.response is not None and e.response.status_code == 404:
-                    print(f"[NBA LINEUP] {path} 404 → 다른 season_averages 경로 시도")
-                    continue
-                raise
-
-        if not rows:
-            print("[NBA LINEUP] season_averages rows=0 → empty dataframe")
-            return pd.DataFrame()
-
-        df = pd.DataFrame(rows)
         
 
-        # -----------------------------
-        # ✅ DROP-IN: advanced 응답에 pts/ast/reb가 없으면
-        #            type=base로 한 번 더 받아서 merge
-        # -----------------------------
-        need_base = False
-        if "pts" not in df.columns or "ast" not in df.columns or "reb" not in df.columns:
-            need_base = True
-        else:
-            # 컬럼은 있는데 전부 0이면 사실상 없는 거랑 같음
-            s = (df["pts"].fillna(0).abs().sum()
-                 + df["ast"].fillna(0).abs().sum()
-                 + df["reb"].fillna(0).abs().sum())
-            if s < 1e-6:
-                need_base = True
-
-        if need_base:
-            try:
-                base_rows: List[Dict[str, Any]] = []
-                cursor2: Optional[int] = None
-
-                # 같은 path로 type만 base로 재호출
-                while True:
-                    params2: Dict[str, Any] = {
-                        "season": season,
-                        "season_type": "regular",
-                        "type": "base",          # ✅ 핵심
-                        "per_page": 100,
-                    }
-                    if cursor2 is not None:
-                        params2["cursor"] = cursor2
-
-                    data2 = self._get(path, params=params2)
-                    items2 = data2.get("data", [])
-                    if not items2:
-                        break
-
-                    for s2 in items2:
-                        player2 = s2.get("player", {}) or {}
-                        stats2 = s2.get("stats", {}) or {}
-
-                        base_rows.append(
-                            {
-                                "player_id": player2.get("id"),
-                                "min_base": float(stats2.get("min", 0) or 0),
-                                "pts_base": float(stats2.get("pts", 0) or 0),
-                                "reb_base": float(stats2.get("reb", 0) or 0),
-                                "ast_base": float(stats2.get("ast", 0) or 0),
-                            }
-                        )
-
-                    meta2 = data2.get("meta", {}) or {}
-                    next_cursor2 = meta2.get("next_cursor")
-                    if not next_cursor2 or next_cursor2 == cursor2:
-                        break
-                    cursor2 = next_cursor2
-
-                if base_rows:
-                    df_base = pd.DataFrame(base_rows).dropna(subset=["player_id"]).drop_duplicates("player_id")
-                    df["player_id"] = df["player_id"].astype("Int64")
-                    df_base["player_id"] = df_base["player_id"].astype("Int64")
-
-                    df = df.merge(df_base, on="player_id", how="left")
-
-                    # base 값으로 채워넣기
-                    df["min"] = df["min"].fillna(df["min_base"])
-                    df["pts"] = df["pts"].fillna(0) + df["pts_base"].fillna(0)
-                    df["reb"] = df["reb"].fillna(0) + df["reb_base"].fillna(0)
-                    df["ast"] = df["ast"].fillna(0) + df["ast_base"].fillna(0)
-
-                    df.drop(columns=["min_base", "pts_base", "reb_base", "ast_base"], inplace=True, errors="ignore")
-
-                    print("[NBA LINEUP] patched: merged base season_averages for pts/ast/reb")
-
-            except Exception as e:
-                print("[NBA LINEUP] base merge failed:", repr(e))
-        # -----------------------------
+        
 
 
+# ==========================================================
+# Core: build team-level lineup table
+# ==========================================================
+def _is_out_status(status: Any, cfg: NHLLineupConfig) -> bool:
+    s = _norm(status)
+    if not s:
+        return False
+    return any(k in s for k in cfg.out_keywords)
 
-        if team_ids:
-            team_ids_int = set(int(tid) for tid in team_ids)
-            df = df[df["team_id"].isin(team_ids_int)].copy()
 
+def _compute_star_scores(team_df: pd.DataFrame, cfg: NHLLineupConfig) -> pd.DataFrame:
+    """
+    team_df: one-team season averages subset
+    MUST have: toi, pts, g, a, is_goalie
+    Returns team_df with 'star_score'
+    """
+    df = team_df.copy()
+
+    df["toi"] = pd.to_numeric(df.get("toi", 0), errors="coerce").fillna(0.0)
+    df["pts"] = pd.to_numeric(df.get("pts", 0), errors="coerce").fillna(0.0)
+    df["g"] = pd.to_numeric(df.get("g", 0), errors="coerce").fillna(0.0)
+    df["a"] = pd.to_numeric(df.get("a", 0), errors="coerce").fillna(0.0)
+    df["is_goalie"] = pd.to_numeric(df.get("is_goalie", 0), errors="coerce").fillna(0).astype(int)
+
+    # 기본적으로 goalie는 스타 랭킹에서 제외(별도 처리)
+    skaters = df[df["is_goalie"] == 0].copy()
+    if skaters.empty:
+        df["star_score"] = 0.0
         return df
 
+    skaters = skaters[skaters["toi"] >= float(cfg.star_min_toi_for_rank)].copy()
+    if skaters.empty:
+        skaters = df[df["is_goalie"] == 0].copy()
 
-    def fetch_active_players(self, team_ids: Optional[List[int]] = None) -> pd.DataFrame:
-        """
-        GET /v1/players/active
-          (team_ids가 None이면 전체 active players)
-        """
-        rows: List[Dict[str, Any]] = []
-        cursor: Optional[int] = None
+    denom = skaters["toi"].clip(lower=1.0)
+    skaters["ppm_pts"] = skaters["pts"] / denom
+    skaters["ppm_g"] = skaters["g"] / denom
+    skaters["ppm_a"] = skaters["a"] / denom
 
-        while True:
-            params: Dict[str, Any] = {"per_page": 100}
-            if cursor is not None:
-                params["cursor"] = cursor
+    skaters["impact_base"] = (
+        cfg.star_weight_pts * skaters["ppm_pts"]
+        + cfg.star_weight_g * skaters["ppm_g"]
+        + cfg.star_weight_a * skaters["ppm_a"]
+    )
 
-            if team_ids:
-                for tid in team_ids:
-                    params.setdefault("team_ids[]", []).append(int(tid))
+    # 출전시간 반영: sqrt(toi/18)
+    skaters["toi_scale"] = np.sqrt(skaters["toi"].clip(lower=1.0) / 18.0)
+    skaters["star_score"] = (skaters["impact_base"]) * skaters["toi_scale"]
+    skaters["star_score"] = skaters["star_score"].clip(0.0, float(cfg.star_score_clip))
 
-            data = self._get(self.ACTIVE_PLAYERS_PATH, params=params)
-            items = data.get("data", [])
-            if not items:
-                break
+    out = df.merge(
+        skaters[["player_name", "star_score"]],
+        on="player_name",
+        how="left",
+    )
+    out["star_score"] = out["star_score"].fillna(0.0)
+    return out
 
-            for p in items:
-                team = p.get("team", {}) or {}
-                rows.append(
-                    {
-                        "player_id": p.get("id"),
-                        "player_name": f"{p.get('first_name', '')} {p.get('last_name', '')}".strip(),
-                        "team_id": team.get("id"),
-                        "team_name": team.get("full_name"),
-                    }
-                )
 
-            meta = data.get("meta", {}) or {}
-            next_cursor = meta.get("next_cursor")
-            if not next_cursor or next_cursor == cursor:
-                break
-            cursor = next_cursor
+def _pick_goalie(team_df: pd.DataFrame, cfg: NHLLineupConfig) -> Optional[Dict[str, Any]]:
+    """
+    주전 골리 proxy:
+      - is_goalie==1 중에서 TOI가 가장 큰 선수
+    """
+    df = team_df.copy()
+    if "is_goalie" not in df.columns:
+        return None
+    g = df[df["is_goalie"].astype(int) == 1].copy()
+    if g.empty:
+        return None
+    g["toi"] = pd.to_numeric(g.get("toi", 0), errors="coerce").fillna(0.0)
+    # goalie_min_toi_for_rank 미만이면 신뢰도 낮지만, 그래도 top1 뽑는다
+    g = g.sort_values("toi", ascending=False)
+    row = g.iloc[0].to_dict()
+    return row
 
-        return pd.DataFrame(rows)
-
-    def fetch_player_injuries(self, team_ids: Optional[List[int]] = None) -> pd.DataFrame:
-        """
-        GET /v1/player_injuries
-          (team_ids가 None이면 전체 부상)
-        """
-        rows: List[Dict[str, Any]] = []
-        cursor: Optional[int] = None
-
-        while True:
-            params: Dict[str, Any] = {"per_page": 100}
-            if cursor is not None:
-                params["cursor"] = cursor
-
-            if team_ids:
-                for tid in team_ids:
-                    params.setdefault("team_ids[]", []).append(int(tid))
-
-            data = self._get(self.PLAYER_INJURIES_PATH, params=params)
-            items = data.get("data", [])
-            if not items:
-                break
-
-            for inj in items:
-                player = inj.get("player", {}) or {}
-                team_id = player.get("team_id")
-
-                rows.append(
-                    {
-                        "player_id": player.get("id"),
-                        "player_name": f"{player.get('first_name', '')} {player.get('last_name', '')}".strip(),
-                        "team_id": team_id,
-                        "status": inj.get("status"),
-                        "description": inj.get("description"),
-                        "return_date": inj.get("return_date"),
-                    }
-                )
-
-            meta = data.get("meta", {}) or {}
-            next_cursor = meta.get("next_cursor")
-            if not next_cursor or next_cursor == cursor:
-                break
-            cursor = next_cursor
-
-        return pd.DataFrame(rows)
-# ---------- 라인업 Feature 생성 ----------
 
 def build_lineup_table_for_today(
     season: int,
-    team_names: List[str],
-    cfg: NBALineupConfig | None = None,
+    team_ids: Optional[List[int]] = None,
+    team_names: Optional[List[str]] = None,
+    today: Optional[_date] = None,
+    cfg: NHLLineupConfig | None = None,
 ) -> pd.DataFrame:
     """
-    입력:
-      - season: 현재 시즌 (예: 2024)
-      - team_names: 오늘 경기에서 등장하는 팀 full_name 리스트
-
-    출력 (team 레벨):
-      - team_name
-      - team_id
-      - season
+    Output: team-level features
+      - team_id, team_name, season
       - lineup_depth_score
-      - lineup_missing_star_flag
       - lineup_missing_star_count
+      - lineup_missing_star_score
+      - goalie_out_flag
+      - goalie_missing_score
     """
-    cfg = cfg or NBALineupConfig()
-    client = NBALineupClient()
+    cfg = cfg or NHLLineupConfig()
+    today = today or _date.today()
 
-    # 1) 시즌 평균 전체(or 팀 필터 없는 호출)
-    season_avg = client.fetch_season_averages(season=season, team_ids=None)
-    if season_avg.empty:
-        print("[NBA LINEUP] season_averages empty → skip.")
-        return pd.DataFrame()
-    
-    print("[DEBUG][LINEUP] season_avg net_rating describe:", season_avg["net_rating"].describe())
-    
-    print(f"[LINEUP DEBUG] season_avg rows={len(season_avg)} "
-        f"net_rating_col={'net_rating' in season_avg.columns}")
-    if not season_avg.empty and "net_rating" in season_avg.columns:
-        s = season_avg["net_rating"].astype(float).fillna(0.0)
-        print(f"[LINEUP DEBUG] season_avg net_rating: nonzero_rate={(s.abs()>1e-9).mean():.2f}, "
-            f"min={s.min():.3f}, mean={s.mean():.3f}, max={s.max():.3f}")
+    client = NHLLineupClient()
 
-
-
-
-
-    season_avg = season_avg.copy()
-    season_avg["player_id"] = season_avg["player_id"].astype("Int64")
-    season_avg["min"] = season_avg["min"].fillna(0.0)
-    season_avg["pts"] = season_avg["pts"].fillna(0.0)
-
-    # 🔥 net_rating 컬럼 없으면 0으로 생성 + NaN 방지
-    if "net_rating" not in season_avg.columns:
-        season_avg["net_rating"] = 0.0
-    season_avg["net_rating"] = season_avg["net_rating"].fillna(0.0)
-    
-    # =========================
-    # ✅ NET RATING STABILIZER (DROP-IN)
-    # - balldontlie season_averages에서 표본 작은 선수 net_rating이 -800 같은 극단값이 나올 수 있음
-    # - 현실적인 범위로 clip해서 로짓이 망가지지 않게 방지
-    # =========================
-    season_avg["net_rating"] = pd.to_numeric(season_avg["net_rating"], errors="coerce").fillna(0.0)
-
-    # (1) 현실적인 NBA net rating 범위로 winsorize/clip
-    NET_CLIP_LO, NET_CLIP_HI = -25.0, 25.0
-    season_avg["net_rating"] = season_avg["net_rating"].clip(NET_CLIP_LO, NET_CLIP_HI)
-
-    # (2) (옵션) 로테이션 분(min)이 너무 작은 선수는 영향 최소화하고 싶으면 바닥 분 적용
-    #     - 너는 이미 min>=10으로 rotation을 잡아서 크게 필요없지만,
-    #     - rotation empty fallback 상황에서도 안전장치로 의미 있음
-    season_avg["min"] = pd.to_numeric(season_avg["min"], errors="coerce").fillna(0.0)
-
-
-
-    # 2) active / injuries 전체 호출 (한 번만)
-    active_df = client.fetch_active_players(team_ids=None)
-    inj_df = client.fetch_player_injuries(team_ids=None)
-    
-    print(f"[LINEUP DEBUG] active_df rows={len(active_df)}, inj_df rows={len(inj_df)}")
-    if not inj_df.empty and "status" in inj_df.columns:
-        print("[LINEUP DEBUG] injury status top:")
-        print(inj_df["status"].astype(str).str.lower().value_counts().head(10))
-
-    
-    print("[DEBUG][LINEUP] active_df rows:", len(active_df), "inj_df rows:", len(inj_df))
-
-
-    # 2-1) active_df 기반으로 player → team 매핑
-    if not active_df.empty:
-        active_df = active_df.copy()
-        active_df["player_id"] = active_df["player_id"].astype("Int64")
-        active_df["team_id"] = active_df["team_id"].astype("Int64")
-        active_df["team_name_norm"] = active_df["team_name"].astype(str).str.lower()
-
-        player_team_map = (
-            active_df[["player_id", "team_id", "team_name", "team_name_norm"]]
-            .dropna(subset=["player_id", "team_id"])
-            .drop_duplicates("player_id")
-        )
-
-        season_avg = season_avg.merge(player_team_map, on="player_id", how="left", suffixes=("_sa", "_act"))
-
-        # active 쪽 team_id를 우선 사용, 없으면 season_avg 원본 사용
-        season_avg["team_id"] = season_avg["team_id_act"].combine_first(season_avg["team_id_sa"])
-
-        # 불필요 컬럼 제거 (꼭)
-        season_avg.drop(columns=["team_id_sa", "team_id_act"], inplace=True, errors="ignore")
-
-
-    
+    # team_ids가 있으면 그 팀들만 대상으로 시즌 스탯 구성
+    if team_ids:
+        season_avg = client.fetch_player_season_avgs(season=season, team_ids=team_ids)
     else:
-        # active 정보도 없으면 사실상 라인업 기능 못 씀
-        print("[NBA LINEUP] active players empty → skip lineup.")
+        # team_names만 있는 경우: 일단 CSV fallback 우선
+        season_avg = pd.DataFrame()
+
+    if season_avg is None or season_avg.empty:
+        season_avg = client.load_csv_season_avgs()
+
+    if season_avg is None or season_avg.empty:
+        print("[NHL LINEUP] season_avgs empty (API+CSV). Skip lineup.")
         return pd.DataFrame()
 
-    # 3) 오늘 경기 팀 이름 normalize
-    season_avg["team_name_norm"] = season_avg["team_name"].astype(str).str.lower()
+    df_sa = season_avg.copy()
 
-    if team_names:
-        needed = pd.Series(team_names).dropna().str.lower().unique().tolist()
-        teams_present = (
-            season_avg[season_avg["team_name_norm"].isin(needed)]["team_name_norm"]
-            .dropna().unique().tolist()
-        )
-    else:
-        # team_names가 비어있으면 필터링 스킵 (team_id join 경로 지원)
-        teams_present = season_avg["team_name_norm"].dropna().unique().tolist()
+    # normalize + required columns
+    for c in ["team_id", "team_name", "player_name", "position"]:
+        if c not in df_sa.columns:
+            df_sa[c] = np.nan
 
+    # is_goalie heuristic if missing
+    if "is_goalie" not in df_sa.columns:
+        df_sa["is_goalie"] = df_sa["position"].apply(lambda x: 1 if _norm(x) in ("g", "goalie", "goaltender") else 0)
 
-    # 4) injuries dtype 정리
-    if not inj_df.empty:
-        inj_df["player_id"] = inj_df["player_id"].astype("Int64")
-        inj_df["team_id"] = inj_df["team_id"].astype("Int64")
+    # numeric
+    for c in ["toi", "pts", "g", "a", "is_goalie"]:
+        if c not in df_sa.columns:
+            df_sa[c] = 0
+    df_sa["toi"] = pd.to_numeric(df_sa["toi"], errors="coerce").fillna(0.0)
+    df_sa["pts"] = pd.to_numeric(df_sa["pts"], errors="coerce").fillna(0.0)
+    df_sa["g"] = pd.to_numeric(df_sa["g"], errors="coerce").fillna(0.0)
+    df_sa["a"] = pd.to_numeric(df_sa["a"], errors="coerce").fillna(0.0)
+    df_sa["is_goalie"] = pd.to_numeric(df_sa["is_goalie"], errors="coerce").fillna(0).astype(int)
 
+    # team filters
+    if team_ids:
+        keep = set(int(x) for x in team_ids if x is not None)
+        df_sa["team_id_int"] = pd.to_numeric(df_sa["team_id"], errors="coerce").fillna(-1).astype(int)
+        df_sa = df_sa[df_sa["team_id_int"].isin(keep)].copy()
 
-    
-    def _norm(s: Any) -> str:
-        # diacritics 제거 + 소문자 + 공백 정리
-        s = "" if s is None else str(s)
-        s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
-        return " ".join(s.lower().strip().split())
+    if (df_sa.empty) and team_names:
+        need = set(_norm(x) for x in team_names if x)
+        df_sa["team_name_norm"] = df_sa["team_name"].apply(_norm)
+        df_sa = df_sa[df_sa["team_name_norm"].isin(need)].copy()
 
-    def _is_out_status(x: Any) -> bool:
-        s = _norm(x)
-        # 확정적으로 결장급만 처리 (오탐 방지)
-        return ("out" in s) or ("doubtful" in s)
+    if df_sa.empty:
+        print("[NHL LINEUP] season_avgs filtered empty. Skip lineup.")
+        return pd.DataFrame()
 
+    # 2) injuries today: API best-effort, fallback CSV
+    inj = client.fetch_injuries_today(today)
+    if inj is None or inj.empty:
+        inj = client.load_csv_injuries_today()
 
-    
+    if inj is None:
+        inj = pd.DataFrame()
+
+    # normalize injury fields
+    if not inj.empty:
+        for c in ["team_id", "team_name", "player_name", "position", "status"]:
+            if c not in inj.columns:
+                inj[c] = np.nan
+        if "is_goalie" not in inj.columns:
+            inj["is_goalie"] = inj["position"].apply(lambda x: 1 if _norm(x) in ("g", "goalie", "goaltender") else 0)
+
+        inj["team_id_int"] = pd.to_numeric(inj["team_id"], errors="coerce").fillna(-1).astype(int)
+        inj["player_name_norm"] = inj["player_name"].apply(_norm)
+        inj["status_out"] = inj["status"].apply(lambda x: _is_out_status(x, cfg))
+
+    # Build per-team
     out_rows: List[Dict[str, Any]] = []
 
-    for tnorm in teams_present:
-        sa_team = season_avg[season_avg["team_name_norm"] == tnorm].copy()
-        if sa_team.empty:
+    # iterate by team_id if possible
+    if "team_id" in df_sa.columns:
+        df_sa["team_id_int"] = pd.to_numeric(df_sa["team_id"], errors="coerce").fillna(-1).astype(int)
+        team_keys = sorted(df_sa["team_id_int"].unique().tolist())
+    else:
+        df_sa["team_name_norm"] = df_sa["team_name"].apply(_norm)
+        team_keys = sorted(df_sa["team_name_norm"].dropna().unique().tolist())
+
+    for key in team_keys:
+        if isinstance(key, int):
+            team_df = df_sa[df_sa["team_id_int"] == key].copy()
+        else:
+            team_df = df_sa[df_sa["team_name_norm"] == key].copy()
+
+        if team_df.empty:
             continue
 
-        tname = sa_team["team_name"].iloc[0]
-        tid = sa_team["team_id"].dropna().iloc[0] if sa_team["team_id"].notna().any() else None
+        team_name = str(team_df["team_name"].dropna().iloc[0]) if team_df["team_name"].notna().any() else str(key)
+        team_id = int(team_df["team_id_int"].iloc[0]) if "team_id_int" in team_df.columns else None
 
-        # 로테이션 후보
-        sa_team = sa_team.sort_values("min", ascending=False)
-        rotation = sa_team[sa_team["min"] >= cfg.min_minutes_rotation].copy()
+        # rotation: skaters only
+        skaters = team_df[team_df["is_goalie"] == 0].copy()
+        skaters = skaters.sort_values("toi", ascending=False)
+
+        rotation = skaters[skaters["toi"] >= float(cfg.min_toi_rotation)].copy()
         if rotation.empty:
-            rotation = sa_team.copy()
+            rotation = skaters.copy()
 
-        baseline_total_min = rotation["min"].sum()
-        if baseline_total_min <= 0:
-            baseline_total_min = 1.0
+        baseline_total_toi = float(rotation["toi"].sum())
+        if baseline_total_toi <= 0:
+            baseline_total_toi = 1.0
 
-        # ✅ Stars: "득점 상위" 대신 "Impact Score" 상위로 선정
-        # - 분당 생산성(pts/ast/reb) + 출전시간(min) + net_rating(있으면)
-        rot_for_star = rotation.copy()
-
-        # 스타 후보 최소 출전시간 필터(너무 적게 뛴 선수로 스타 선정되는 것 방지)
-        rot_for_star = rot_for_star[rot_for_star["min"] >= cfg.star_min_minutes_for_rank].copy()
-        if rot_for_star.empty:
-            rot_for_star = rotation.copy()
-
-        # per-minute 생산성
-        denom = rot_for_star["min"].clip(lower=1.0)
-        rot_for_star["ppm_pts"] = rot_for_star["pts"] / denom
-        rot_for_star["ppm_ast"] = rot_for_star["ast"] / denom
-        rot_for_star["ppm_reb"] = rot_for_star["reb"] / denom
-
-        # impact base score
-        rot_for_star["impact_base"] = (
-            cfg.star_weight_pts * rot_for_star["ppm_pts"]
-            + cfg.star_weight_ast * rot_for_star["ppm_ast"]
-            + cfg.star_weight_reb * rot_for_star["ppm_reb"]
+        # star scoring
+        team_df_scored = _compute_star_scores(team_df, cfg)
+        # stars among skaters by star_score
+        stars = (
+            team_df_scored[team_df_scored["is_goalie"] == 0]
+            .sort_values("star_score", ascending=False)
+            .head(int(cfg.top_n_stars))
+            .copy()
         )
+        star_names = set(stars["player_name"].dropna().astype(str).tolist())
+        star_score_map = dict(zip(stars["player_name"].astype(str), stars["star_score"].astype(float)))
 
-        # net bonus (net_rating가 0만 들어오는 날도 있으니 안전하게)
-        rot_for_star["net_bonus"] = cfg.star_weight_net * rot_for_star["net_rating"].fillna(0.0)
+        # goalie pick
+        goalie = _pick_goalie(team_df_scored, cfg)
+        goalie_name = str(goalie.get("player_name")) if goalie else None
+        goalie_score = float(cfg.goalie_score_clip) if goalie and cfg.goalie_is_star else 0.0
 
-        # 출전시간 반영(분이 클수록 실제 영향력이 커짐) : sqrt(min/30)
-        rot_for_star["min_scale"] = np.sqrt(rot_for_star["min"].clip(lower=1.0) / 30.0)
-
-        rot_for_star["star_score"] = (rot_for_star["impact_base"] + rot_for_star["net_bonus"]) * rot_for_star["min_scale"]
-        rot_for_star["star_score"] = rot_for_star["star_score"].clip(0.0, cfg.star_score_clip)
-
-        stars = rot_for_star.sort_values("star_score", ascending=False).head(cfg.top_n_stars).copy()
-        star_ids = set(stars["player_id"].dropna().astype(int).tolist())
-        star_score_map = dict(zip(stars["player_id"].astype(int), stars["star_score"].astype(float)))
-
-
-        # 오늘 가용 선수: active_df + injuries
-        if tid is not None and not active_df.empty:
-            act_team = active_df[active_df["team_id"] == tid]
-            active_ids = set(act_team["player_id"].dropna().astype(int).tolist())
-        else:
-            active_ids = set()
-
-        # -----------------------------
-        # ✅ OUT IDS (ROBUST, DROP-IN)
-        # - 1) team_id로 매칭 (정상 케이스)
-        # - 2) team_id가 틀리거나 누락돼도, "rotation에 포함된 player_id"면 OUT로 인정 (핵심)
-        # -----------------------------
-
-        out_ids = set()
-        out_names = []
-
-        if not inj_df.empty:
-            inj_tmp = inj_df.copy()
-            inj_tmp["player_id"] = inj_tmp["player_id"].astype("Int64")
-            inj_tmp["team_id"] = inj_tmp["team_id"].astype("Int64")
-            inj_tmp["status_out"] = inj_tmp["status"].apply(_is_out_status)
-
-            # (A) team_id 매칭
-            out_by_team = set()
-            if tid is not None:
-                inj_team = inj_tmp[(inj_tmp["team_id"] == tid) & (inj_tmp["status_out"])].copy()
-                if not inj_team.empty:
-                    out_by_team = set(inj_team["player_id"].dropna().astype(int).tolist())
-
-            # (B) rotation 교집합 매칭 (team_id가 깨져도 잡는 안전장치)
-            rot_ids = set(rotation["player_id"].dropna().astype(int).tolist())
-            inj_rot = inj_tmp[inj_tmp["status_out"] & inj_tmp["player_id"].notna()].copy()
-            out_by_rotation = set(inj_rot["player_id"].astype(int).tolist()) & rot_ids
-
-            out_ids = out_by_team | out_by_rotation
-
-        # ==========================================================
-        # ✅ NEW: BASELINE-ELIGIBILITY FILTER (핵심)
-        # - 시즌 내내 못 뛴 선수(min~0)는 baseline에도 없으니 "결장 페널티" 대상 아님
-        # - out_ids에서 "이번 시즌 기여자"만 남김
-        #   * 기준: min >= min_minutes_rotation OR min >= star_min_minutes_for_rank
-        # ==========================================================
-        if out_ids:
-            # sa_team은 해당 팀의 season_avg subset (이미 확보됨)
-            sa_min_map = dict(
-                sa_team[["player_id", "min"]]
-                .dropna(subset=["player_id"])
-                .assign(player_id=lambda d: d["player_id"].astype(int))
-                .values
-            )
-
-            def _baseline_eligible(pid: int) -> bool:
-                m = float(sa_min_map.get(int(pid), 0.0) or 0.0)
-                return (m >= float(cfg.min_minutes_rotation)) or (m >= float(cfg.star_min_minutes_for_rank))
-
-            out_ids_raw = set(out_ids)
-            out_ids = {pid for pid in out_ids_raw if _baseline_eligible(pid)}
-
-            # debug name map (필터링 이후 기준으로)
-            if not inj_df.empty and out_ids:
-                name_map = dict(
-                    inj_tmp[inj_tmp["player_id"].notna()][["player_id", "player_name"]]
-                    .drop_duplicates("player_id")
-                    .assign(player_id=lambda d: d["player_id"].astype(int))
-                    .values
-                )
-                out_names = [name_map.get(pid, str(pid)) for pid in list(out_ids)[:8]]
+        # OUT list
+        out_names: set[str] = set()
+        if not inj.empty:
+            # (A) team_id match
+            if team_id is not None and team_id >= 0:
+                inj_team = inj[(inj["team_id_int"] == team_id) & (inj["status_out"])].copy()
             else:
-                out_names = []
+                inj_team = pd.DataFrame()
 
-            # (선택) 필터링으로 얼마나 줄었는지 로그
-            if out_ids_raw != out_ids:
-                print(
-                    f"[LINEUP DEBUG] {tname}: out_ids filtered by baseline eligibility "
-                    f"raw={len(out_ids_raw)} -> kept={len(out_ids)}"
-                )
-        # ==========================================================
+            # (B) fallback: team_name match if needed
+            if inj_team.empty:
+                team_norm = _norm(team_name)
+                inj["team_name_norm"] = inj["team_name"].apply(_norm)
+                inj_team = inj[(inj["team_name_norm"] == team_norm) & (inj["status_out"])].copy()
 
-        # -----------------------------
-        # ✅ available_ids 계산 (이제 out_ids는 '페널티 대상 OUT'만 포함)
-        # -----------------------------
-        if active_ids:
-            available_ids = {pid for pid in active_ids if pid not in out_ids}
-        else:
-            all_ids = set(rotation["player_id"].dropna().astype(int).tolist())
-            available_ids = {pid for pid in all_ids if pid not in out_ids}
-            
-            
-            
-            
+            if not inj_team.empty:
+                out_names = set(inj_team["player_name_norm"].dropna().astype(str).tolist())
 
-            # debug용 이름(폭발 방지: 최대 8명)
-            if out_ids:
-                name_map = dict(
-                    inj_tmp[inj_tmp["player_id"].notna()][["player_id", "player_name"]]
-                    .drop_duplicates("player_id")
-                    .assign(player_id=lambda d: d["player_id"].astype(int))
-                    .values
-                )
-                out_names = [name_map.get(pid, str(pid)) for pid in list(out_ids)[:8]]
+        # availability among rotation by name matching (robust even if no player_id)
+        rotation["player_name_norm"] = rotation["player_name"].apply(_norm)
+        rotation["is_available"] = ~rotation["player_name_norm"].isin(out_names)
 
-        # -----------------------------
+        active_toi = float(rotation.loc[rotation["is_available"], "toi"].sum())
+        depth_score = active_toi / baseline_total_toi
+        depth_score = float(np.clip(depth_score, float(cfg.depth_clip_min), float(cfg.depth_clip_max)))
 
+        # star missing score
+        missing_star = []
+        missing_star_score = 0.0
+        for pn in star_names:
+            if _norm(pn) in out_names:
+                missing_star.append(pn)
+                missing_star_score += float(star_score_map.get(str(pn), 0.0))
 
-        if active_ids:
-            available_ids = {pid for pid in active_ids if pid not in out_ids}
-        else:
-            all_ids = set(rotation["player_id"].dropna().astype(int).tolist())
-            available_ids = {pid for pid in all_ids if pid not in out_ids}
+        missing_star_score = float(np.clip(missing_star_score, 0.0, float(cfg.star_score_clip) * float(cfg.top_n_stars)))
+        missing_star_count = int(len(missing_star))
 
-        rotation["player_id_int"] = rotation["player_id"].astype(int)
-        rotation["is_available"] = rotation["player_id_int"].isin(available_ids)
-        active_minutes = rotation.loc[rotation["is_available"], "min"].sum()
+        # goalie out
+        goalie_out_flag = 0
+        goalie_missing_score = 0.0
+        if goalie_name:
+            if _norm(goalie_name) in out_names:
+                goalie_out_flag = 1
+                goalie_missing_score = float(np.clip(goalie_score, 0.0, float(cfg.goalie_score_clip)))
 
-        # 🔥 baseline: 모든 로테이션이 건강하다고 가정했을 때 net rating
-        rotation["nr_contrib"] = rotation["net_rating"] * rotation["min"]
-        baseline_net_rating = rotation["nr_contrib"].sum() / baseline_total_min
-
-        # 🔥 오늘 실제 available 기준 net rating
-        if active_minutes > 0:
-            rot_avail = rotation[rotation["is_available"]].copy()
-            rot_avail["nr_contrib"] = rot_avail["net_rating"] * rot_avail["min"]
-            lineup_net_rating_today = rot_avail["nr_contrib"].sum() / active_minutes
-        else:
-            # 극단적 상황(전원 OUT 등) → baseline으로 fallback
-            lineup_net_rating_today = baseline_net_rating
-
-        lineup_net_rating_diff = lineup_net_rating_today - baseline_net_rating
-
-        depth_score = active_minutes / baseline_total_min
-        depth_score = float(
-            np.clip(depth_score, cfg.depth_clip_min, cfg.depth_clip_max)
-        )
-
-        missing_star_ids = [pid for pid in star_ids if pid not in available_ids]
-        missing_star_count = len(missing_star_ids)
-        missing_star_flag = 1 if missing_star_count > 0 else 0
-
-        # ✅ NEW: 결장 스타 "영향력 합"
-        missing_star_score = float(sum(star_score_map.get(int(pid), 0.0) for pid in missing_star_ids))
-        missing_star_score = float(np.clip(missing_star_score, 0.0, cfg.star_score_clip * cfg.top_n_stars))
-
-        if out_names:
-            print(f"[LINEUP DEBUG] {tname}: OUT_IDS(sample)={list(out_ids)[:8]} OUT_NAMES(sample)={out_names}")
-
-        # ===== TEAM-LEVEL DEBUG LOG (ADD HERE) =====
-        print(
-            f"[LINEUP DEBUG] {tname}: "
-            f"baseline_total_min={baseline_total_min:.1f}, "
-            f"active_minutes={active_minutes:.1f}, "
-            f"missing_star_count={missing_star_count}, "
-            f"depth={depth_score:.3f}, "
-            f"net_today={lineup_net_rating_today:.2f}, "
-            f"net_base={baseline_net_rating:.2f}, "
-            f"net_diff={lineup_net_rating_diff:.2f}"
-        )
-        # ==========================================
-
+        # Debug (필요하면 켜고 끄기)
+        # print(f"[NHL LINEUP] {team_name}: depth={depth_score:.3f}, missing_star={missing_star_count}, goalie_out={goalie_out_flag}")
 
         out_rows.append(
             {
-                "team_id": tid,
-                "team_name": tname,
+                "team_id": team_id,
+                "team_name": team_name,
                 "season": season,
                 "lineup_depth_score": depth_score,
-                "lineup_missing_star_flag": missing_star_flag,
                 "lineup_missing_star_count": missing_star_count,
                 "lineup_missing_star_score": missing_star_score,
-
-                # 🔥 NEW: attach_lineup_features에서 쓰는 컬럼들
-                "lineup_net_rating_today": lineup_net_rating_today,
-                "lineup_net_rating_baseline": baseline_net_rating,
-                "lineup_net_rating_diff": lineup_net_rating_diff,
+                "goalie_out_flag": goalie_out_flag,
+                "goalie_missing_score": goalie_missing_score,
             }
         )
-
 
     if not out_rows:
         return pd.DataFrame()
@@ -1100,71 +530,59 @@ def build_lineup_table_for_today(
     return pd.DataFrame(out_rows)
 
 
-
-# ---------- 라인업 Feature attach ----------
-
+# ==========================================================
+# Attach features to scored_games (same style as NBA)
+# ==========================================================
 def attach_lineup_features(
     scored_games: pd.DataFrame,
     today: _date,
-    cfg: NBALineupConfig | None = None,
+    cfg: NHLLineupConfig | None = None,
 ) -> pd.DataFrame:
-    if scored_games.empty:
+    if scored_games is None or scored_games.empty:
         return scored_games
 
-    cfg = cfg or NBALineupConfig()
+    cfg = cfg or NHLLineupConfig()
     df = scored_games.copy()
 
-    # season 결정
+    # season 결정: nhl은 시즌 year 컬럼이 있을 수 있음
     if "season" in df.columns and df["season"].notna().any():
-        season = int(df["season"].dropna().max())
+        season = int(pd.to_numeric(df["season"], errors="coerce").dropna().max())
     else:
-        season = today.year
+        # NHL 시즌은 보통 10월 시작이지만, 여기서는 "현재 연도"를 기본으로.
+        # 너는 nhl_quant_bot에서 season 컨벤션을 이미 잡았으니, 가능하면 season 컬럼을 넣어주는 걸 추천.
+        season = int(today.year)
 
-    # ✅ 1) team_id가 있으면 무조건 team_id로 조인 (문자열 team명 조인 제거)
     has_team_ids = ("home_team_id" in df.columns) and ("away_team_id" in df.columns)
 
     if has_team_ids:
-        team_ids = pd.unique(pd.concat([df["home_team_id"], df["away_team_id"]]).dropna()).astype(int).tolist()
-        # team_names는 기존 함수 시그니처 때문에 더미로만 전달
-        lineup_team = build_lineup_table_for_today(
-            season=season,
-            team_names=[],   # not used for join in this path
-            cfg=cfg,
-        )
+        team_ids = pd.unique(pd.concat([df["home_team_id"], df["away_team_id"]]).dropna()).tolist()
+        team_ids = [tid for tid in (_safe_int(x) for x in team_ids) if tid is not None]
+        lineup_team = build_lineup_table_for_today(season=season, team_ids=team_ids, today=today, cfg=cfg)
     else:
-        # fallback: 기존 name 기반 (가능하면 안 쓰는게 좋음)
         teams_today = pd.unique(pd.concat([df["home_team"], df["away_team"]]).dropna()).tolist()
-        lineup_team = build_lineup_table_for_today(
-            season=season,
-            team_names=teams_today,
-            cfg=cfg,
-        )
+        lineup_team = build_lineup_table_for_today(season=season, team_names=teams_today, today=today, cfg=cfg)
 
-    if lineup_team.empty:
-        print("[NBA LINEUP] lineup_team empty → skip lineup features.")
+    if lineup_team is None or lineup_team.empty:
+        print("[NHL LINEUP] lineup_team empty -> skip lineup features.")
         return df
 
-    # lineup_team team_id dtype 정리
+    # dtype cleanup
     if "team_id" in lineup_team.columns:
-        lineup_team["team_id"] = lineup_team["team_id"].astype("Int64")
+        lineup_team["team_id"] = pd.to_numeric(lineup_team["team_id"], errors="coerce").astype("Int64")
 
-    # -------------------------
-    # ✅ HOME merge
-    # -------------------------
+    # HOME merge
     if has_team_ids and "team_id" in lineup_team.columns:
         home_feat = lineup_team.add_suffix("_home")
-        df["home_team_id"] = df["home_team_id"].astype("Int64")
+        df["home_team_id"] = pd.to_numeric(df["home_team_id"], errors="coerce").astype("Int64")
         df = df.merge(
             home_feat[
                 [
                     "team_id_home",
                     "lineup_depth_score_home",
-                    "lineup_missing_star_flag_home",
                     "lineup_missing_star_count_home",
                     "lineup_missing_star_score_home",
-                    "lineup_net_rating_today_home",
-                    "lineup_net_rating_baseline_home",
-                    "lineup_net_rating_diff_home",
+                    "goalie_out_flag_home",
+                    "goalie_missing_score_home",
                 ]
             ],
             how="left",
@@ -1173,22 +591,18 @@ def attach_lineup_features(
         )
         df.drop(columns=["team_id_home"], inplace=True, errors="ignore")
     else:
-        # fallback: name-based
-        lineup_team["team_name_norm"] = lineup_team["team_name"].astype(str).str.lower()
-        df["home_team_norm"] = df["home_team"].astype(str).str.lower()
-
+        lineup_team["team_name_norm"] = lineup_team["team_name"].apply(_norm)
+        df["home_team_norm"] = df["home_team"].apply(_norm)
         home_feat = lineup_team.add_suffix("_home").rename(columns={"team_name_norm_home": "home_team_norm"})
         df = df.merge(
             home_feat[
                 [
                     "home_team_norm",
                     "lineup_depth_score_home",
-                    "lineup_missing_star_flag_home",
                     "lineup_missing_star_count_home",
                     "lineup_missing_star_score_home",
-                    "lineup_net_rating_today_home",
-                    "lineup_net_rating_baseline_home",
-                    "lineup_net_rating_diff_home",
+                    "goalie_out_flag_home",
+                    "goalie_missing_score_home",
                 ]
             ],
             how="left",
@@ -1196,23 +610,19 @@ def attach_lineup_features(
         )
         df.drop(columns=["home_team_norm"], inplace=True, errors="ignore")
 
-    # -------------------------
-    # ✅ AWAY merge
-    # -------------------------
+    # AWAY merge
     if has_team_ids and "team_id" in lineup_team.columns:
         away_feat = lineup_team.add_suffix("_away")
-        df["away_team_id"] = df["away_team_id"].astype("Int64")
+        df["away_team_id"] = pd.to_numeric(df["away_team_id"], errors="coerce").astype("Int64")
         df = df.merge(
             away_feat[
                 [
                     "team_id_away",
                     "lineup_depth_score_away",
-                    "lineup_missing_star_flag_away",
                     "lineup_missing_star_count_away",
                     "lineup_missing_star_score_away",
-                    "lineup_net_rating_today_away",
-                    "lineup_net_rating_baseline_away",
-                    "lineup_net_rating_diff_away",
+                    "goalie_out_flag_away",
+                    "goalie_missing_score_away",
                 ]
             ],
             how="left",
@@ -1221,21 +631,18 @@ def attach_lineup_features(
         )
         df.drop(columns=["team_id_away"], inplace=True, errors="ignore")
     else:
-        lineup_team["team_name_norm"] = lineup_team["team_name"].astype(str).str.lower()
-        df["away_team_norm"] = df["away_team"].astype(str).str.lower()
-
+        lineup_team["team_name_norm"] = lineup_team["team_name"].apply(_norm)
+        df["away_team_norm"] = df["away_team"].apply(_norm)
         away_feat = lineup_team.add_suffix("_away").rename(columns={"team_name_norm_away": "away_team_norm"})
         df = df.merge(
             away_feat[
                 [
                     "away_team_norm",
                     "lineup_depth_score_away",
-                    "lineup_missing_star_flag_away",
                     "lineup_missing_star_count_away",
                     "lineup_missing_star_score_away",
-                    "lineup_net_rating_today_away",
-                    "lineup_net_rating_baseline_away",
-                    "lineup_net_rating_diff_away",
+                    "goalie_out_flag_away",
+                    "goalie_missing_score_away",
                 ]
             ],
             how="left",
@@ -1243,119 +650,92 @@ def attach_lineup_features(
         )
         df.drop(columns=["away_team_norm"], inplace=True, errors="ignore")
 
-    # =========================
-    # ✅ FAIL-HARD VALIDATION (개선)
-    # =========================
+    # fail-hard validation (optional)
     if cfg.fail_hard_if_lineup_bad:
-        # 1) team coverage
         home_ok = df["lineup_depth_score_home"].notna().mean() if "lineup_depth_score_home" in df.columns else 0.0
         away_ok = df["lineup_depth_score_away"].notna().mean() if "lineup_depth_score_away" in df.columns else 0.0
         coverage = float(min(home_ok, away_ok))
 
-        # 2) net_rating nonzero 체크는 "진짜 net_rating이 들어오는 날"에만 강제
-        net_nonzero = 1.0
-        if "lineup_net_rating_today_home" in df.columns and "lineup_net_rating_today_away" in df.columns:
-            h = df["lineup_net_rating_today_home"].fillna(0).abs()
-            a = df["lineup_net_rating_today_away"].fillna(0).abs()
-
-            # 만약 전체가 0이면 = API가 net_rating을 안 주는 상황 → net 체크 스킵 + weight 사실상 무력화 권장
-            if (h.max() < 1e-9) and (a.max() < 1e-9):
-                net_nonzero = 1.0  # pass
-                # (선택) 여기서 강제로 weight를 0으로 낮추고 싶으면 cfg.lineup_net_weight=0으로 조정하는 방식도 가능
-            else:
-                net_home_nonzero = (h > 1e-9).mean()
-                net_away_nonzero = (a > 1e-9).mean()
-                net_nonzero = float(min(net_home_nonzero, net_away_nonzero))
-
-        if coverage < float(cfg.min_team_coverage) or net_nonzero < float(cfg.min_nonzero_net_share):
+        if coverage < float(cfg.min_team_coverage):
             raise RuntimeError(
-                "[NBA LINEUP FAIL-HARD] Lineup features invalid.\n"
-                f"- team coverage(min(home,away))={coverage:.2f} (need >= {cfg.min_team_coverage:.2f})\n"
-                f"- net_rating nonzero(min(home,away))={net_nonzero:.2f} (need >= {cfg.min_nonzero_net_share:.2f})\n"
+                "[NHL LINEUP FAIL-HARD] Lineup feature join coverage too low.\n"
+                f"- coverage(min(home,away))={coverage:.2f} (need >= {cfg.min_team_coverage:.2f})\n"
                 "→ Abort to avoid trading on bad lineup signal."
             )
 
     return df
 
 
-
-
-
-
+# ==========================================================
+# Adjust probability with lineup features (same style as NBA)
+# ==========================================================
 def adjust_prob_with_lineup(
     scored_games: pd.DataFrame,
-    cfg: NBALineupConfig | None = None,
+    cfg: NHLLineupConfig | None = None,
 ) -> pd.DataFrame:
-    if scored_games.empty:
+    if scored_games is None or scored_games.empty:
         return scored_games
 
-    cfg = cfg or NBALineupConfig()
+    cfg = cfg or NHLLineupConfig()
     df = scored_games.copy()
 
     def _logit(p: float) -> float:
-        eps = 0.01
-        p = float(np.clip(p, eps, 1 - eps))
-        return np.log(p / (1 - p))
+        p = _clip_prob(p)
+        return float(np.log(p / (1.0 - p)))
 
     def _sigmoid(z: float) -> float:
-        return 1.0 / (1.0 + np.exp(-z))
+        z = float(np.clip(z, -50, 50))
+        return float(1.0 / (1.0 + np.exp(-z)))
 
     adj_p = []
-
-    # ✅ NEW: “확실히 페널티가 먹었는지” 확인용 디버그 컬럼들
-    z_star_list = []
-    z_depth_list = []
-    z_net_list = []
-    z_total_list = []
+    z_depth_list, z_star_list, z_goalie_list, z_total_list = [], [], [], []
 
     for _, row in df.iterrows():
-        base_p = float(row.get("p_home_win", 0.5))
-
-        depth_home = float(row.get("lineup_depth_score_home", 1.0) or 1.0)
-        depth_away = float(row.get("lineup_depth_score_away", 1.0) or 1.0)
-        depth_diff = depth_home - depth_away
-
-        # ✅ 결장 스타 "영향력 합" 기반
-        miss_score_home = float(row.get("lineup_missing_star_score_home", 0.0) or 0.0)
-        miss_score_away = float(row.get("lineup_missing_star_score_away", 0.0) or 0.0)
-
-        # 상대가 더 크게 빠졌으면 + (우리에게 유리)
-        star_diff = (miss_score_away - miss_score_home)
-
-        # 🔥 net rating today diff (없으면 0)
-        net_home = float(row.get("lineup_net_rating_today_home", 0.0) or 0.0)
-        net_away = float(row.get("lineup_net_rating_today_away", 0.0) or 0.0)
-        net_diff = net_home - net_away
-
+        base_p = _safe_float(row.get("p_home_win", 0.5), 0.5)
         z_base = _logit(base_p)
 
-        # ✅ 각 컴포넌트 로짓 기여량(로그/검증용)
-        z_depth = cfg.depth_weight * depth_diff
-        z_star  = cfg.star_penalty * star_diff
-        z_net   = cfg.lineup_net_weight * net_diff
+        depth_home = _safe_float(row.get("lineup_depth_score_home", 1.0), 1.0)
+        depth_away = _safe_float(row.get("lineup_depth_score_away", 1.0), 1.0)
+        depth_diff = depth_home - depth_away
 
-        z_adj = z_base + z_depth + z_star + z_net
+        miss_score_home = _safe_float(row.get("lineup_missing_star_score_home", 0.0), 0.0)
+        miss_score_away = _safe_float(row.get("lineup_missing_star_score_away", 0.0), 0.0)
+        # 상대가 더 크게 빠지면 + (home 유리)
+        star_diff = (miss_score_away - miss_score_home)
 
-        # ✅ NEW: 로짓 폭주 방지 clip (너 요청)
+        goalie_miss_home = _safe_float(row.get("goalie_missing_score_home", 0.0), 0.0)
+        goalie_miss_away = _safe_float(row.get("goalie_missing_score_away", 0.0), 0.0)
+        goalie_diff = (goalie_miss_away - goalie_miss_home)
+
+        z_depth = float(cfg.depth_weight) * float(depth_diff)
+        z_star = float(cfg.star_penalty) * float(star_diff)
+        z_goalie = float(cfg.goalie_penalty) * float(goalie_diff)
+
+        z_adj = z_base + z_depth + z_star + z_goalie
+
+        # 로짓 폭주 방지
         z_adj = float(np.clip(z_adj, -3.0, 3.0))
 
         p_adj = _sigmoid(z_adj)
-        adj_p.append(p_adj)
+        adj_p.append(_clip_prob(p_adj))
 
-        # ✅ save debug
         z_depth_list.append(z_depth)
         z_star_list.append(z_star)
-        z_net_list.append(z_net)
+        z_goalie_list.append(z_goalie)
         z_total_list.append(z_adj - z_base)
 
     df["p_home_win_adj"] = adj_p
-
-    # ✅ NEW: “스타 페널티가 실제로 반영됐는지” 바로 보이게 컬럼 저장
     df["z_lineup_depth"] = z_depth_list
     df["z_star_penalty"] = z_star_list
-    df["z_lineup_net"] = z_net_list
+    df["z_goalie_penalty"] = z_goalie_list
     df["z_lineup_total"] = z_total_list
 
     return df
 
+
+
+
+====
+
+이게 내 현재 코드야. 그래서 헷갈려. 어떤 부분을 정확하게 교체하는지 너꺼랑 일치하지 않아서. 
 
