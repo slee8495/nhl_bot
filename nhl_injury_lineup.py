@@ -624,8 +624,22 @@ def attach_lineup_features(
     has_team_ids = ("home_team_id" in df.columns) and ("away_team_id" in df.columns)
 
     if has_team_ids:
-        team_ids = pd.unique(pd.concat([df["home_team_id"], df["away_team_id"]]).dropna()).tolist()
-        team_ids = [tid for tid in (_safe_int(x) for x in team_ids) if tid is not None]
+        raw_ids = pd.concat([df["home_team_id"], df["away_team_id"]], ignore_index=True)
+
+        # ✅ robust: "61.0", 61.0, "61" 다 OK
+        raw_ids = pd.to_numeric(raw_ids, errors="coerce")
+
+        team_ids = (
+            raw_ids.dropna()
+            .astype(int)
+            .drop_duplicates()
+            .tolist()
+        )
+
+        if not team_ids:
+            print("[NHL LINEUP] team_ids missing after numeric cast -> skip lineup.")
+            return df
+
         lineup_team = build_lineup_table_for_today(season=season, team_ids=team_ids, today=today, cfg=cfg)
     else:
         teams_today = pd.unique(pd.concat([df["home_team"], df["away_team"]]).dropna()).tolist()
