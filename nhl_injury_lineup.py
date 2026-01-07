@@ -475,6 +475,8 @@ def build_lineup_table_for_today(
     # ==========================================================
     # 2) player season stats (player별 호출) -> df_sa 생성
     # ==========================================================
+    rows: list[dict] = []   # ✅ 이 줄이 반드시 있어야 함 (NameError 방지)
+
     for _, p in players.iterrows():
         pid = _safe_int(p.get("id"))
         if pid is None:
@@ -485,7 +487,11 @@ def build_lineup_table_for_today(
         is_goalie = 1 if _norm(pos_code) in ("g", "goalie", "goaltender") else 0
 
         teams_list = p.get("teams")
-        team0 = teams_list[0] if isinstance(teams_list, list) and len(teams_list) > 0 and isinstance(teams_list[0], dict) else {}
+        team0 = (
+            teams_list[0]
+            if isinstance(teams_list, list) and len(teams_list) > 0 and isinstance(teams_list[0], dict)
+            else {}
+        )
         team_id = _safe_int(team0.get("id"))
         team_name = team0.get("full_name") or ""
 
@@ -497,26 +503,25 @@ def build_lineup_table_for_today(
             payload = client.fetch_player_season_stats(player_id=pid, season=season_bdl)
             st_map = _kv_list_to_dict(payload.get("data"))
 
-            # ✅ BDL stat keys (문서의 "Available Stat Types" 참고)
-            # points / goals / assists / time_on_ice_per_game 등이 존재
+            # ✅ BDL stat keys
             pts = st_map.get("points", 0)
             g   = st_map.get("goals", 0)
             a   = st_map.get("assists", 0)
 
-            # TOI는 time_on_ice_per_game 우선, 없으면 time_on_ice
+            # ✅ TOI: per_game 우선
             toi_raw = st_map.get("time_on_ice_per_game", None)
             if toi_raw is None:
                 toi_raw = st_map.get("time_on_ice", 0)
             toi = _toi_to_float_minutes(toi_raw)
 
-            # ✅ points가 없으면 goals+assists로 대체
-            if pts in (None, 0) and (g or a):
+            # ✅ points 없으면 goals+assists로 대체
+            if (pts is None or float(pts) == 0.0) and ((g or 0) + (a or 0) > 0):
                 pts = (g or 0) + (a or 0)
 
             rows.append(
                 {
                     "player_id": pid,
-                    "player_name": player_name,
+                    "player_name": player_name, 
                     "team_id": team_id,
                     "team_name": team_name,
                     "position": pos_code,
@@ -532,8 +537,8 @@ def build_lineup_table_for_today(
             print(f"[NHL LINEUP DEBUG] season_stats failed pid={pid} err={type(e).__name__}: {e}")
             continue
 
- 
     df_sa = pd.DataFrame(rows)
+
     if df_sa.empty:
         print("[NHL LINEUP] season_avgs empty (players+season_stats). Skip lineup.")
         return pd.DataFrame()

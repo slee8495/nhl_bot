@@ -387,6 +387,42 @@ def _pick_goalie(team_df: pd.DataFrame, cfg: NHLLineupConfig) -> Optional[Dict[s
     return row
 
 
+def _kv_list_to_dict(data: Any) -> dict:
+    """
+    BDL season_stats처럼 [{"name": "...", "value": ...}, ...] -> dict로 변환
+    """
+    if not isinstance(data, list):
+        return {}
+    out = {}
+    for row in data:
+        if isinstance(row, dict) and ("name" in row):
+            out[str(row["name"])] = row.get("value")
+    return out
+
+
+def _toi_to_float_minutes(x: Any) -> float:
+    """
+    time_on_ice / time_on_ice_per_game가
+    - 숫자면 그대로 float
+    - "06:03" 같은 문자열이면 minutes로 변환
+    """
+    if x is None:
+        return 0.0
+    if isinstance(x, (int, float)) and not (isinstance(x, float) and np.isnan(x)):
+        return float(x)
+    s = str(x).strip()
+    if ":" in s:
+        try:
+            mm, ss = s.split(":")
+            return float(int(mm)) + float(int(ss)) / 60.0
+        except Exception:
+            return 0.0
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+    
+
 def build_lineup_table_for_today(
     season: int,
     team_ids: Optional[List[int]] = None,
@@ -439,37 +475,43 @@ def build_lineup_table_for_today(
     # ==========================================================
     # 2) player season stats (player별 호출) -> df_sa 생성
     # ==========================================================
-    rows = []
     for _, p in players.iterrows():
         pid = _safe_int(p.get("id"))
         if pid is None:
             continue
 
+        # ✅ players schema: position_code, teams[] (list)
+        pos_code = (p.get("position_code") or "").strip()
+        is_goalie = 1 if _norm(pos_code) in ("g", "goalie", "goaltender") else 0
+
+        teams_list = p.get("teams")
+        team0 = teams_list[0] if isinstance(teams_list, list) and len(teams_list) > 0 and isinstance(teams_list[0], dict) else {}
+        team_id = _safe_int(team0.get("id"))
+        team_name = team0.get("full_name") or ""
+
+        first = p.get("first_name") or ""
+        last = p.get("last_name") or ""
+        player_name = (f"{first} {last}").strip() or p.get("full_name") or str(pid)
+
         try:
             payload = client.fetch_player_season_stats(player_id=pid, season=season_bdl)
-            data = payload.get("data")
+            st_map = _kv_list_to_dict(payload.get("data"))
 
-            # data가 dict 또는 list일 수 있음
-            if isinstance(data, dict):
-                data = [data]
-            st = (data[0] if (isinstance(data, list) and len(data) > 0) else {}) or {}
+            # ✅ BDL stat keys (문서의 "Available Stat Types" 참고)
+            # points / goals / assists / time_on_ice_per_game 등이 존재
+            pts = st_map.get("points", 0)
+            g   = st_map.get("goals", 0)
+            a   = st_map.get("assists", 0)
 
-            team = p.get("team") if isinstance(p.get("team"), dict) else {}
-            team_id = _safe_int(team.get("id")) or _safe_int(p.get("team_id"))
-            team_name = team.get("full_name") or team.get("name") or p.get("team_name")
+            # TOI는 time_on_ice_per_game 우선, 없으면 time_on_ice
+            toi_raw = st_map.get("time_on_ice_per_game", None)
+            if toi_raw is None:
+                toi_raw = st_map.get("time_on_ice", 0)
+            toi = _toi_to_float_minutes(toi_raw)
 
-            first = p.get("first_name") or ""
-            last = p.get("last_name") or ""
-            player_name = (f"{first} {last}").strip() or p.get("full_name") or str(pid)
-
-            pos = p.get("position") or ""
-            is_goalie = 1 if _norm(pos) in ("g", "goalie", "goaltender") else 0
-
-            # best-effort stat keys
-            toi = st.get("toi") or st.get("time_on_ice") or st.get("avg_toi") or 0
-            pts = st.get("points") or st.get("pts") or 0
-            g = st.get("goals") or st.get("g") or 0
-            a = st.get("assists") or st.get("a") or 0
+            # ✅ points가 없으면 goals+assists로 대체
+            if pts in (None, 0) and (g or a):
+                pts = (g or 0) + (a or 0)
 
             rows.append(
                 {
@@ -477,7 +519,7 @@ def build_lineup_table_for_today(
                     "player_name": player_name,
                     "team_id": team_id,
                     "team_name": team_name,
-                    "position": pos,
+                    "position": pos_code,
                     "toi": _safe_float(toi, 0.0),
                     "pts": _safe_float(pts, 0.0),
                     "g": _safe_float(g, 0.0),
@@ -490,6 +532,7 @@ def build_lineup_table_for_today(
             print(f"[NHL LINEUP DEBUG] season_stats failed pid={pid} err={type(e).__name__}: {e}")
             continue
 
+ 
     df_sa = pd.DataFrame(rows)
     if df_sa.empty:
         print("[NHL LINEUP] season_avgs empty (players+season_stats). Skip lineup.")
@@ -511,45 +554,38 @@ def build_lineup_table_for_today(
                 return (f"{fn} {ln}").strip()
             return ""
 
-        def _get_team_id(x: Any) -> Optional[int]:
-            if isinstance(x, dict):
-                return _safe_int(x.get("id"))
-            return None
+        def _get_team_id_from_player(x: Any) -> Optional[int]:
+            if not isinstance(x, dict):
+                return None
+            teams = x.get("teams")
+            t0 = teams[0] if isinstance(teams, list) and len(teams) > 0 and isinstance(teams[0], dict) else {}
+            return _safe_int(t0.get("id"))
 
-        def _get_team_name(x: Any) -> str:
-            if isinstance(x, dict):
-                return x.get("full_name") or x.get("name") or ""
-            return ""
-
-        if "player_name" not in inj.columns:
-            if "player" in inj.columns:
-                inj["player_name"] = inj["player"].apply(_get_player_name)
-            else:
-                inj["player_name"] = ""
+        def _get_team_name_from_player(x: Any) -> str:
+            if not isinstance(x, dict):
+                return ""
+            teams = x.get("teams")
+            t0 = teams[0] if isinstance(teams, list) and len(teams) > 0 and isinstance(teams[0], dict) else {}
+            return t0.get("full_name") or ""
 
         if "team_id" not in inj.columns:
-            if "team" in inj.columns:
-                inj["team_id"] = inj["team"].apply(_get_team_id)
+            if "player" in inj.columns:
+                inj["team_id"] = inj["player"].apply(_get_team_id_from_player)
             else:
-                if "player" in inj.columns:
-                    inj["team_id"] = inj["player"].apply(
-                        lambda d: _safe_int(d.get("team_id")) if isinstance(d, dict) else None
-                    )
-                else:
-                    inj["team_id"] = None
+                inj["team_id"] = None
 
         if "team_name" not in inj.columns:
-            if "team" in inj.columns:
-                inj["team_name"] = inj["team"].apply(_get_team_name)
+            if "player" in inj.columns:
+                inj["team_name"] = inj["player"].apply(_get_team_name_from_player)
             else:
                 inj["team_name"] = ""
 
-        if "status" not in inj.columns:
-            inj["status"] = inj.get("injury_status", "") if "injury_status" in inj.columns else ""
+                if "status" not in inj.columns:
+                    inj["status"] = inj.get("injury_status", "") if "injury_status" in inj.columns else ""
 
-        inj["team_id_int"] = pd.to_numeric(inj["team_id"], errors="coerce").fillna(-1).astype(int)
-        inj["player_name_norm"] = inj["player_name"].apply(_norm)
-        inj["status_out"] = inj["status"].apply(lambda x: _is_out_status(x, cfg))
+                inj["team_id_int"] = pd.to_numeric(inj["team_id"], errors="coerce").fillna(-1).astype(int)
+                inj["player_name_norm"] = inj["player_name"].apply(_norm)
+                inj["status_out"] = inj["status"].apply(lambda x: _is_out_status(x, cfg))
 
     # ==========================================================
     # df_sa 컬럼/타입 정리
