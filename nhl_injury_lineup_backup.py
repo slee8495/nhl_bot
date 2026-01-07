@@ -14,6 +14,7 @@ import requests
 
 from config import BALLDONTLIE_API_KEY, NHL_BASE_URL, DATA_DIR
 
+print("[NHL LINEUP] LOADED nhl_injury_lineup.py (tricode-mapping build)")
 
 # ==========================================================
 # Utilities
@@ -56,6 +57,28 @@ def _normalize_bdl_season(season: int) -> int:
     if s >= 1_000_000:       # e.g., 20242025
         return s // 10000    # -> 2024
     return s
+
+def _normalize_tricode(x: Any) -> str:
+    s = _norm(x).upper()
+    return s.replace(" ", "")
+
+def _resolve_bdl_team_ids_from_tricodes(tricodes: List[str], client: NHLLineupClient) -> List[int]:
+    """
+    schedule의 home_team_abbr/away_team_abbr(=tricode) -> BDL /teams의 id로 매핑
+    """
+    teams = client.fetch_teams()
+    if teams is None or teams.empty:
+        return []
+
+    teams = teams.copy()
+    teams["tricode_norm"] = teams["tricode"].apply(_normalize_tricode)
+
+    want = {_normalize_tricode(t) for t in tricodes if t}
+    hit = teams[teams["tricode_norm"].isin(want)]
+
+    out = pd.to_numeric(hit["team_id"], errors="coerce").dropna().astype(int).unique().tolist()
+    return out
+
 
 
 # ==========================================================
@@ -640,26 +663,28 @@ def attach_lineup_features(
     has_team_ids = ("home_team_id" in df.columns) and ("away_team_id" in df.columns)
 
     if has_team_ids:
-        raw_ids = pd.concat([df["home_team_id"], df["away_team_id"]], ignore_index=True)
+        # ✅ 핵심: NHLDataClient team_id는 BDL team_id와 다를 수 있음
+        # → schedule의 tricode로 BDL team_id를 재구성
+        if ("home_team_abbr" in df.columns) and ("away_team_abbr" in df.columns):
+            tricodes = pd.unique(pd.concat([df["home_team_abbr"], df["away_team_abbr"]]).dropna()).tolist()
+            tricodes = [str(x) for x in tricodes if str(x).strip()]
 
-        # ✅ robust: "61.0", 61.0, "61" 다 OK
-        raw_ids = pd.to_numeric(raw_ids, errors="coerce")
+            bdl_client = NHLLineupClient()
+            team_ids_bdl = _resolve_bdl_team_ids_from_tricodes(tricodes, bdl_client)
 
-        team_ids = (
-            raw_ids.dropna()
-            .astype(int)
-            .drop_duplicates()
-            .tolist()
-        )
+            if not team_ids_bdl:
+                print("[NHL LINEUP] could not resolve BDL team_ids from tricodes -> skip lineup.")
+                return df
 
-        if not team_ids:
-            print("[NHL LINEUP] team_ids missing after numeric cast -> skip lineup.")
-            return df
-
-        lineup_team = build_lineup_table_for_today(season=season, team_ids=team_ids, today=today, cfg=cfg)
+            lineup_team = build_lineup_table_for_today(season=season, team_ids=team_ids_bdl, today=today, cfg=cfg)
+        else:
+            # abbr 없으면 fallback (정확도 낮음)
+            teams_today = pd.unique(pd.concat([df.get("home_team", pd.Series()), df.get("away_team", pd.Series())]).dropna()).tolist()
+            lineup_team = build_lineup_table_for_today(season=season, team_names=teams_today, today=today, cfg=cfg)
     else:
         teams_today = pd.unique(pd.concat([df["home_team"], df["away_team"]]).dropna()).tolist()
         lineup_team = build_lineup_table_for_today(season=season, team_names=teams_today, today=today, cfg=cfg)
+
 
     if lineup_team is None or lineup_team.empty:
         print("[NHL LINEUP] lineup_team empty -> skip lineup features.")
