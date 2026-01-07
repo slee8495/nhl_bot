@@ -1,3 +1,33 @@
+# ✅ scored_games가 edge/lineup에 필요한 팀 컬럼을 잃어버릴 수 있음
+# ✅ source-of-truth = today_games (schedule)
+need = ["game_id", "season", "home_team_id", "away_team_id", "home_team", "away_team", "home_team_abbr", "away_team_abbr"]
+have = [c for c in need if c in today_games.columns]
+
+if have:
+    meta = today_games[have].drop_duplicates(subset=["game_id"])
+    scored_games = scored_games.merge(meta, on="game_id", how="left")
+
+# ✅ 방어: home/away team은 edge에서 필수
+if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
+    raise RuntimeError("[NHL MAIN] scored_games missing home_team/away_team after merge (schedule meta join failed).")
+
+
+---
+
+# ✅ scored_games가 edge/lineup에 필요한 팀 컬럼을 잃어버릴 수 있음
+# ✅ source-of-truth = tomorrow_games (schedule)
+need = ["game_id", "season", "home_team_id", "away_team_id", "home_team", "away_team", "home_team_abbr", "away_team_abbr"]
+have = [c for c in need if c in tomorrow_games.columns]
+
+if have:
+    meta = tomorrow_games[have].drop_duplicates(subset=["game_id"])
+    scored_games = scored_games.merge(meta, on="game_id", how="left")
+
+if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
+    raise RuntimeError("[NHL NEXT] scored_games missing home_team/away_team after merge (schedule meta join failed).")
+
+--
+
 
 try:
     from nhl_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
