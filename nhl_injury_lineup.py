@@ -610,6 +610,20 @@ def build_lineup_table_for_today(
                 inj["player_name_norm"] = inj["player_name"].apply(_norm)
                 inj["status_out"] = inj["status"].apply(lambda x: _is_out_status(x, cfg))
 
+        # ==========================================================
+        # ✅ HARDEN injuries df schema (KeyError 'team_id_int' 방지)
+        # ==========================================================
+        if inj is None:
+            inj = pd.DataFrame()
+
+        # inj가 비어있든 말든, 아래 컬럼들은 "항상" 존재하게 강제
+        if "team_id_int" not in inj.columns:
+            inj["team_id_int"] = -1
+        if "status_out" not in inj.columns:
+            inj["status_out"] = False
+        if "player_name_norm" not in inj.columns:
+            inj["player_name_norm"] = ""
+
     # ==========================================================
     # df_sa 컬럼/타입 정리
     # ==========================================================
@@ -691,7 +705,7 @@ def build_lineup_table_for_today(
         # OUT list (by injuries)
         out_names: set[str] = set()
         if inj is not None and (not inj.empty):
-            inj_team = inj[(inj["team_id_int"] == int(tid)) & (inj["status_out"])].copy()
+            inj_team = inj[(inj.get("team_id_int", -1) == int(tid)) & (inj.get("status_out", False))].copy()
             if not inj_team.empty:
                 out_names = set(inj_team["player_name_norm"].dropna().astype(str).tolist())
 
