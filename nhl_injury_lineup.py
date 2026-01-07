@@ -565,12 +565,13 @@ def build_lineup_table_for_today(
     # 3) injuries (team_ids 필터) -> inj 정규화
     # ==========================================================
     inj_raw = client.fetch_player_injuries(team_ids=team_ids)
+
     if inj_raw is None or inj_raw.empty:
         inj = pd.DataFrame()
     else:
         inj = inj_raw.copy()
 
-        def _get_player_name(x: Any) -> str:
+        def _get_player_name_from_player(x: Any) -> str:
             if isinstance(x, dict):
                 fn = x.get("first_name") or ""
                 ln = x.get("last_name") or ""
@@ -581,48 +582,58 @@ def build_lineup_table_for_today(
             if not isinstance(x, dict):
                 return None
             teams = x.get("teams")
-            t0 = teams[0] if isinstance(teams, list) and len(teams) > 0 and isinstance(teams[0], dict) else {}
+            t0 = teams[0] if isinstance(teams, list) and teams and isinstance(teams[0], dict) else {}
             return _safe_int(t0.get("id"))
 
         def _get_team_name_from_player(x: Any) -> str:
             if not isinstance(x, dict):
                 return ""
             teams = x.get("teams")
-            t0 = teams[0] if isinstance(teams, list) and len(teams) > 0 and isinstance(teams[0], dict) else {}
+            t0 = teams[0] if isinstance(teams, list) and teams and isinstance(teams[0], dict) else {}
             return t0.get("full_name") or ""
 
+        # player_name
+        if "player_name" not in inj.columns:
+            if "player" in inj.columns:
+                inj["player_name"] = inj["player"].apply(_get_player_name_from_player)
+            else:
+                inj["player_name"] = ""
+
+        # team_id
         if "team_id" not in inj.columns:
             if "player" in inj.columns:
                 inj["team_id"] = inj["player"].apply(_get_team_id_from_player)
             else:
                 inj["team_id"] = None
 
+        # team_name
         if "team_name" not in inj.columns:
             if "player" in inj.columns:
                 inj["team_name"] = inj["player"].apply(_get_team_name_from_player)
             else:
                 inj["team_name"] = ""
 
-                if "status" not in inj.columns:
-                    inj["status"] = inj.get("injury_status", "") if "injury_status" in inj.columns else ""
+        # status
+        if "status" not in inj.columns:
+            inj["status"] = inj.get("injury_status", "") if "injury_status" in inj.columns else ""
 
-                inj["team_id_int"] = pd.to_numeric(inj["team_id"], errors="coerce").fillna(-1).astype(int)
-                inj["player_name_norm"] = inj["player_name"].apply(_norm)
-                inj["status_out"] = inj["status"].apply(lambda x: _is_out_status(x, cfg))
+        # normalized helper cols
+        inj["team_id_int"] = pd.to_numeric(inj["team_id"], errors="coerce").fillna(-1).astype(int)
+        inj["player_name_norm"] = inj["player_name"].apply(_norm)
+        inj["status_out"] = inj["status"].apply(lambda x: _is_out_status(x, cfg))
 
-        # ==========================================================
-        # ✅ HARDEN injuries df schema (KeyError 'team_id_int' 방지)
-        # ==========================================================
-        if inj is None:
-            inj = pd.DataFrame()
+    # ==========================================================
+    # ✅ HARDEN injuries df schema (KeyError 방지)
+    # ==========================================================
+    if inj is None:
+        inj = pd.DataFrame()
 
-        # inj가 비어있든 말든, 아래 컬럼들은 "항상" 존재하게 강제
-        if "team_id_int" not in inj.columns:
-            inj["team_id_int"] = -1
-        if "status_out" not in inj.columns:
-            inj["status_out"] = False
-        if "player_name_norm" not in inj.columns:
-            inj["player_name_norm"] = ""
+    if "team_id_int" not in inj.columns:
+        inj["team_id_int"] = -1
+    if "status_out" not in inj.columns:
+        inj["status_out"] = False
+    if "player_name_norm" not in inj.columns:
+        inj["player_name_norm"] = ""
 
     # ==========================================================
     # df_sa 컬럼/타입 정리
