@@ -1,169 +1,3 @@
-
-
-# ✅ schedule(today_games)에서 팀 메타를 scored_games에 강제 주입
-need = ["game_id", "season", "home_team_id", "away_team_id", "home_team", "away_team", "home_team_abbr", "away_team_abbr"]
-have = [c for c in need if c in today_games.columns]
-
-# (A) scored_games에 같은 이름 컬럼이 이미 있으면 suffix 문제 생김 → 먼저 제거
-dup_cols = [c for c in need if c != "game_id" and c in scored_games.columns]
-if dup_cols:
-    scored_games = scored_games.drop(columns=dup_cols, errors="ignore")
-
-# (B) merge
-if have:
-    meta = today_games[have].drop_duplicates(subset=["game_id"]).copy()
-    scored_games["game_id"] = pd.to_numeric(scored_games["game_id"], errors="coerce")
-    meta["game_id"] = pd.to_numeric(meta["game_id"], errors="coerce")
-    scored_games = scored_games.merge(meta, on="game_id", how="left")
-
-# (C) 최소 필수 컬럼 보장 (edge/lineup이 필요)
-if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
-    # suffix가 생긴 경우까지 커버 (혹시 남아있다면)
-    for side in ["home_team", "away_team"]:
-        if side not in scored_games.columns:
-            if f"{side}_y" in scored_games.columns:
-                scored_games[side] = scored_games[f"{side}_y"]
-            elif f"{side}_x" in scored_games.columns:
-                scored_games[side] = scored_games[f"{side}_x"]
-
-if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
-    raise RuntimeError("[NHL MAIN] scored_games missing home_team/away_team after schedule meta join.")
-
-
----
-
-need = ["game_id", "season", "home_team_id", "away_team_id", "home_team", "away_team", "home_team_abbr", "away_team_abbr"]
-have = [c for c in need if c in tomorrow_games.columns]
-
-dup_cols = [c for c in need if c != "game_id" and c in scored_games.columns]
-if dup_cols:
-    scored_games = scored_games.drop(columns=dup_cols, errors="ignore")
-
-if have:
-    meta = tomorrow_games[have].drop_duplicates(subset=["game_id"]).copy()
-    scored_games["game_id"] = pd.to_numeric(scored_games["game_id"], errors="coerce")
-    meta["game_id"] = pd.to_numeric(meta["game_id"], errors="coerce")
-    scored_games = scored_games.merge(meta, on="game_id", how="left")
-
-if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
-    for side in ["home_team", "away_team"]:
-        if side not in scored_games.columns:
-            if f"{side}_y" in scored_games.columns:
-                scored_games[side] = scored_games[f"{side}_y"]
-            elif f"{side}_x" in scored_games.columns:
-                scored_games[side] = scored_games[f"{side}_x"]
-
-if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
-    raise RuntimeError("[NHL NEXT] scored_games missing home_team/away_team after schedule meta join.")
-
-
----
-
-
-Run if [ "false" = "true" ]; then
-[RUN] Using normal script: nhl_quant_main.py
-[NHL MAIN] Running (PT) for date=2026-01-07
-[SCHED DEBUG] time_col picked: start_time_utc
-[SCHED DEBUG] columns: ['game_id', 'start_time_utc', 'game_date', 'date', 'season', 'home_team_id', 'away_team_id', 'home_team_abbr', 'away_team_abbr', 'home_team', 'away_team', 'home_score', 'away_score', 'status', 'postseason', 'period', 'time']
-[SCHED DEBUG] time sample: ['2026-01-04T19:00:00.000Z', '2026-01-04T20:00:00.000Z', '2026-01-04T22:00:00.000Z']
-Traceback (most recent call last):
-[SCHED DEBUG] slate_date counts (top):
-  File "/home/runner/work/nhl_bot/nhl_bot/nhl_quant_main.py", line 396, in <module>
-    main()
-  File "/home/runner/work/nhl_bot/nhl_bot/nhl_quant_main.py", line 307, in main
-    raise RuntimeError("[NHL MAIN] scored_games missing home_team/away_team after merge (schedule meta join failed).")
-RuntimeError: [NHL MAIN] scored_games missing home_team/away_team after merge (schedule meta join failed).
-slate_date
-2026-01-10    14
-2026-01-08    12
-2026-01-06    10
-2026-01-04     5
-2026-01-05     5
-Name: count, dtype: int64
-[DEBUG][ODDS][ATTACH_GAME_ID] rows=218 null_rate=0.000
-[SLATE FIX][NHL] odds_game_ids=5 | today_games(after odds filter)=5
-[NHL MAIN] Final slate(PT)=2026-01-07 | games=5 | odds_rows=90
-Error: Process completed with exit code 1.
-
-
---
-
-
-
-
-# ✅ scored_games가 edge/lineup에 필요한 팀 컬럼을 잃어버릴 수 있음
-# ✅ source-of-truth = today_games (schedule)
-need = ["game_id", "season", "home_team_id", "away_team_id", "home_team", "away_team", "home_team_abbr", "away_team_abbr"]
-have = [c for c in need if c in today_games.columns]
-
-if have:
-    meta = today_games[have].drop_duplicates(subset=["game_id"])
-    scored_games = scored_games.merge(meta, on="game_id", how="left")
-
-# ✅ 방어: home/away team은 edge에서 필수
-if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
-    raise RuntimeError("[NHL MAIN] scored_games missing home_team/away_team after merge (schedule meta join failed).")
-
-
----
-
-# ✅ scored_games가 edge/lineup에 필요한 팀 컬럼을 잃어버릴 수 있음
-# ✅ source-of-truth = tomorrow_games (schedule)
-need = ["game_id", "season", "home_team_id", "away_team_id", "home_team", "away_team", "home_team_abbr", "away_team_abbr"]
-have = [c for c in need if c in tomorrow_games.columns]
-
-if have:
-    meta = tomorrow_games[have].drop_duplicates(subset=["game_id"])
-    scored_games = scored_games.merge(meta, on="game_id", how="left")
-
-if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
-    raise RuntimeError("[NHL NEXT] scored_games missing home_team/away_team after merge (schedule meta join failed).")
-
---
-
-
-try:
-    from nhl_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
-    HAS_LINEUP = True
-except ModuleNotFoundError:
-    HAS_LINEUP = False
-    attach_lineup_features = None
-    adjust_prob_with_lineup = None
-    print("[NHL MAIN] nhl_injury_lineup not found -> lineup/injury adjustments disabled.")
-
----
-
-# ✅ lineup에 필요한 팀 정보가 scored_games에 없을 수 있음 → today_df에서 복구
-need_cols = ["game_id", "home_team_id", "away_team_id", "home_team", "away_team", "season"]
-have_cols = [c for c in need_cols if c in today_df.columns]
-
-if have_cols:
-    meta = today_df[have_cols].drop_duplicates(subset=["game_id"])
-    scored_games = scored_games.merge(meta, on="game_id", how="left")
-
----
-
-if HAS_LINEUP:
-    try:
-        scored_games = attach_lineup_features(scored_games, today=today)
-        scored_games = adjust_prob_with_lineup(scored_games)
-    except Exception as e:
-        print(f"[NHL MAIN] lineup adjust skipped: {e}")
-
-
----
-
-# ✅ lineup에 필요한 팀 정보가 scored_games에 없을 수 있음 → today_df에서 복구
-need_cols = ["game_id", "home_team_id", "away_team_id", "home_team", "away_team", "season"]
-have_cols = [c for c in need_cols if c in today_df.columns]
-
-if have_cols:
-    meta = today_df[have_cols].drop_duplicates(subset=["game_id"])
-    scored_games = scored_games.merge(meta, on="game_id", how="left")
-
----
-
-
 # nhl_quant_main.py
 
 from __future__ import annotations
@@ -185,7 +19,14 @@ from nhl_performance import update_bet_log_and_summary
 from nhl_strategy_tuning import tune_strategy_from_log
 from email_management import send_nhl_daily_report
 
-from nhl_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
+try:
+    from nhl_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
+    HAS_LINEUP = True
+except ModuleNotFoundError:
+    HAS_LINEUP = False
+    attach_lineup_features = None
+    adjust_prob_with_lineup = None
+    print("[NHL MAIN] nhl_injury_lineup not found -> lineup/injury adjustments disabled.")
 
 
 
@@ -452,15 +293,31 @@ def main():
     win_model = NHLQuantModel.load_from_disk()
     scored_games = win_model.predict_proba(today_df)
 
+    # ✅ scored_games가 edge/lineup에 필요한 팀 컬럼을 잃어버릴 수 있음
+    # ✅ source-of-truth = today_games (schedule)
+    need = ["game_id", "season", "home_team_id", "away_team_id", "home_team", "away_team", "home_team_abbr", "away_team_abbr"]
+    have = [c for c in need if c in today_games.columns]
+
+    if have:
+        meta = today_games[have].drop_duplicates(subset=["game_id"])
+        scored_games = scored_games.merge(meta, on="game_id", how="left")
+
+    # ✅ 방어: home/away team은 edge에서 필수
+    if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
+        raise RuntimeError("[NHL MAIN] scored_games missing home_team/away_team after merge (schedule meta join failed).")
+
+
+
     # ✅ downstream merge 안정화: 오늘 날짜로 고정
     scored_games["date"] = today
 
     # ✅ (5.1) Lineup/Injury features + prob adjust
-    try:
-        scored_games = attach_lineup_features(scored_games, today=today)
-        scored_games = adjust_prob_with_lineup(scored_games)
-    except Exception as e:
-        print(f"[NHL MAIN] lineup adjust skipped: {e}")
+    if HAS_LINEUP:
+        try:
+            scored_games = attach_lineup_features(scored_games, today=today)
+            scored_games = adjust_prob_with_lineup(scored_games)
+        except Exception as e:
+            print(f"[NHL MAIN] lineup adjust skipped: {e}")
 
     # ✅ lineup adjust 후에도 날짜 다시 고정 (안전)
     scored_games["date"] = today
@@ -541,8 +398,7 @@ if __name__ == "__main__":
 
 
 
-======================
-
+===
 
 # nhl_quant_main_next_day.py
 
@@ -771,13 +627,17 @@ def main():
     scored_games = win_model.predict_proba(today_df)
     scored_games["date"] = slate_date_pt
 
-    # ✅ (5.1) Lineup/Injury features + prob adjust (DROP-IN)
-    if HAS_LINEUP:
-        try:
-            scored_games = attach_lineup_features(scored_games, today=slate_date_pt)
-            scored_games = adjust_prob_with_lineup(scored_games)
-        except Exception as e:
-            print(f"[NHL NEXT] lineup adjust skipped: {e}")
+    # ✅ scored_games가 edge/lineup에 필요한 팀 컬럼을 잃어버릴 수 있음
+    # ✅ source-of-truth = tomorrow_games (schedule)
+    need = ["game_id", "season", "home_team_id", "away_team_id", "home_team", "away_team", "home_team_abbr", "away_team_abbr"]
+    have = [c for c in need if c in tomorrow_games.columns]
+
+    if have:
+        meta = tomorrow_games[have].drop_duplicates(subset=["game_id"])
+        scored_games = scored_games.merge(meta, on="game_id", how="left")
+
+    if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
+        raise RuntimeError("[NHL NEXT] scored_games missing home_team/away_team after merge (schedule meta join failed).")
 
 
 
@@ -839,7 +699,9 @@ if __name__ == "__main__":
 
 
 
-========================
 
 
-Main 쪽 코드 건드는 거면, 이거 두개 파일 다 맞게 고쳐줘. 
+====
+
+조금만 더 정확히 알려줘. 
+어디를 지우고 어디롤 추가할지? 
