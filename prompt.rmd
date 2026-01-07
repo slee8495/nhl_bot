@@ -1,3 +1,129 @@
+def _kv_list_to_dict(data: Any) -> dict:
+    """
+    BDL season_stats처럼 [{"name": "...", "value": ...}, ...] -> dict로 변환
+    """
+    if not isinstance(data, list):
+        return {}
+    out = {}
+    for row in data:
+        if isinstance(row, dict) and ("name" in row):
+            out[str(row["name"])] = row.get("value")
+    return out
+
+
+def _toi_to_float_minutes(x: Any) -> float:
+    """
+    time_on_ice / time_on_ice_per_game가
+    - 숫자면 그대로 float
+    - "06:03" 같은 문자열이면 minutes로 변환
+    """
+    if x is None:
+        return 0.0
+    if isinstance(x, (int, float)) and not (isinstance(x, float) and np.isnan(x)):
+        return float(x)
+    s = str(x).strip()
+    if ":" in s:
+        try:
+            mm, ss = s.split(":")
+            return float(int(mm)) + float(int(ss)) / 60.0
+        except Exception:
+            return 0.0
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+---
+
+for _, p in players.iterrows():
+    pid = _safe_int(p.get("id"))
+    if pid is None:
+        continue
+
+    # ✅ players schema: position_code, teams[] (list)
+    pos_code = (p.get("position_code") or "").strip()
+    is_goalie = 1 if _norm(pos_code) in ("g", "goalie", "goaltender") else 0
+
+    teams_list = p.get("teams")
+    team0 = teams_list[0] if isinstance(teams_list, list) and len(teams_list) > 0 and isinstance(teams_list[0], dict) else {}
+    team_id = _safe_int(team0.get("id"))
+    team_name = team0.get("full_name") or ""
+
+    first = p.get("first_name") or ""
+    last = p.get("last_name") or ""
+    player_name = (f"{first} {last}").strip() or p.get("full_name") or str(pid)
+
+    try:
+        payload = client.fetch_player_season_stats(player_id=pid, season=season_bdl)
+        st_map = _kv_list_to_dict(payload.get("data"))
+
+        # ✅ BDL stat keys (문서의 "Available Stat Types" 참고)
+        # points / goals / assists / time_on_ice_per_game 등이 존재
+        pts = st_map.get("points", 0)
+        g   = st_map.get("goals", 0)
+        a   = st_map.get("assists", 0)
+
+        # TOI는 time_on_ice_per_game 우선, 없으면 time_on_ice
+        toi_raw = st_map.get("time_on_ice_per_game", None)
+        if toi_raw is None:
+            toi_raw = st_map.get("time_on_ice", 0)
+        toi = _toi_to_float_minutes(toi_raw)
+
+        # ✅ points가 없으면 goals+assists로 대체
+        if pts in (None, 0) and (g or a):
+            pts = (g or 0) + (a or 0)
+
+        rows.append(
+            {
+                "player_id": pid,
+                "player_name": player_name,
+                "team_id": team_id,
+                "team_name": team_name,
+                "position": pos_code,
+                "toi": _safe_float(toi, 0.0),
+                "pts": _safe_float(pts, 0.0),
+                "g": _safe_float(g, 0.0),
+                "a": _safe_float(a, 0.0),
+                "is_goalie": int(is_goalie),
+            }
+        )
+
+    except Exception as e:
+        print(f"[NHL LINEUP DEBUG] season_stats failed pid={pid} err={type(e).__name__}: {e}")
+        continue
+
+
+---
+
+def _get_team_id_from_player(x: Any) -> Optional[int]:
+    if not isinstance(x, dict):
+        return None
+    teams = x.get("teams")
+    t0 = teams[0] if isinstance(teams, list) and len(teams) > 0 and isinstance(teams[0], dict) else {}
+    return _safe_int(t0.get("id"))
+
+def _get_team_name_from_player(x: Any) -> str:
+    if not isinstance(x, dict):
+        return ""
+    teams = x.get("teams")
+    t0 = teams[0] if isinstance(teams, list) and len(teams) > 0 and isinstance(teams[0], dict) else {}
+    return t0.get("full_name") or ""
+
+if "team_id" not in inj.columns:
+    if "player" in inj.columns:
+        inj["team_id"] = inj["player"].apply(_get_team_id_from_player)
+    else:
+        inj["team_id"] = None
+
+if "team_name" not in inj.columns:
+    if "player" in inj.columns:
+        inj["team_name"] = inj["player"].apply(_get_team_name_from_player)
+    else:
+        inj["team_name"] = ""
+
+
+---
+
 
 def _attach_bdl_team_ids_to_games(df: pd.DataFrame, bdl_client: "NHLLineupClient") -> pd.DataFrame:
     """
