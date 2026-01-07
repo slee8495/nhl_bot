@@ -1,3 +1,76 @@
+
+# ✅ lineup_team에 tricode 붙이기 (나중에 abbr로 merge 하기 위해)
+teams_df = bdl_client.fetch_teams()
+teams_df["tricode_norm"] = teams_df["tricode"].astype(str).str.upper().str.strip()
+teams_df["team_id_int"] = pd.to_numeric(teams_df["team_id"], errors="coerce").astype("Int64")
+
+lineup_team["team_id"] = pd.to_numeric(lineup_team["team_id"], errors="coerce").astype("Int64")
+
+lineup_team = lineup_team.merge(
+    teams_df[["team_id_int", "tricode_norm"]],
+    left_on="team_id",
+    right_on="team_id_int",
+    how="left",
+)
+
+lineup_team.rename(columns={"tricode_norm": "team_abbr"}, inplace=True)
+lineup_team.drop(columns=["team_id_int"], inplace=True, errors="ignore")
+
+
+---
+
+# ✅ HOME merge (by abbr)
+lineup_team["team_abbr"] = lineup_team["team_abbr"].astype(str).str.upper().str.strip()
+df["home_team_abbr_norm"] = df["home_team_abbr"].astype(str).str.upper().str.strip()
+
+home_feat = lineup_team.add_suffix("_home").rename(columns={"team_abbr_home": "home_team_abbr_norm"})
+df = df.merge(
+    home_feat[
+        [
+            "home_team_abbr_norm",
+            "lineup_depth_score_home",
+            "lineup_missing_star_count_home",
+            "lineup_missing_star_score_home",
+            "goalie_out_flag_home",
+            "goalie_missing_score_home",
+        ]
+    ],
+    how="left",
+    on="home_team_abbr_norm",
+)
+df.drop(columns=["home_team_abbr_norm"], inplace=True, errors="ignore")
+
+# ✅ AWAY merge (by abbr)
+df["away_team_abbr_norm"] = df["away_team_abbr"].astype(str).str.upper().str.strip()
+away_feat = lineup_team.add_suffix("_away").rename(columns={"team_abbr_away": "away_team_abbr_norm"})
+df = df.merge(
+    away_feat[
+        [
+            "away_team_abbr_norm",
+            "lineup_depth_score_away",
+            "lineup_missing_star_count_away",
+            "lineup_missing_star_score_away",
+            "goalie_out_flag_away",
+            "goalie_missing_score_away",
+        ]
+    ],
+    how="left",
+    on="away_team_abbr_norm",
+)
+df.drop(columns=["away_team_abbr_norm"], inplace=True, errors="ignore")
+
+
+---
+
+print("[NHL LINEUP DEBUG] scored cols:", list(df.columns))
+print("[NHL LINEUP DEBUG] abbr sample:", df["home_team_abbr"].head(3).tolist(), df["away_team_abbr"].head(3).tolist())
+
+
+---
+
+
+
+
 def attach_lineup_features(
     scored_games: pd.DataFrame,
     today: _date,
