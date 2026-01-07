@@ -1,3 +1,41 @@
+print("[NHL LINEUP DEBUG] columns=", list(df.columns))
+print("[NHL LINEUP DEBUG] home_team_id head=", df.get("home_team_id").head(3).tolist() if "home_team_id" in df.columns else None)
+
+--
+
+print(f"[NHL LINEUP DEBUG] extracted team_ids n={len(team_ids)} sample={team_ids[:8]}")
+
+--
+
+if not team_ids:
+    print("[NHL LINEUP] team_ids missing -> skip lineup (NHL needs team_ids).")
+    return pd.DataFrame()
+
+--
+
+if not team_ids:
+    if team_names:
+        # name -> id 매핑 시도
+        teams_df = client.fetch_teams()
+        teams_df["name_norm"] = teams_df["full_name"].apply(_norm)
+
+        want = set(_norm(x) for x in team_names if x)
+        mapped = teams_df[teams_df["name_norm"].isin(want)]["team_id"].dropna().astype(int).tolist()
+
+        if mapped:
+            team_ids = mapped
+        else:
+            print("[NHL LINEUP] team_ids missing and team_names not mappable -> skip lineup.")
+            return pd.DataFrame()
+    else:
+        print("[NHL LINEUP] team_ids missing -> skip lineup (NHL needs team_ids).")
+        return pd.DataFrame()
+
+--
+
+
+
+
 # nhl_injury_lineup.py
 from __future__ import annotations
 
