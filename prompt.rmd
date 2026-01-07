@@ -1,3 +1,46 @@
+
+try:
+    from nhl_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
+    HAS_LINEUP = True
+except ModuleNotFoundError:
+    HAS_LINEUP = False
+    attach_lineup_features = None
+    adjust_prob_with_lineup = None
+    print("[NHL MAIN] nhl_injury_lineup not found -> lineup/injury adjustments disabled.")
+
+---
+
+# ✅ lineup에 필요한 팀 정보가 scored_games에 없을 수 있음 → today_df에서 복구
+need_cols = ["game_id", "home_team_id", "away_team_id", "home_team", "away_team", "season"]
+have_cols = [c for c in need_cols if c in today_df.columns]
+
+if have_cols:
+    meta = today_df[have_cols].drop_duplicates(subset=["game_id"])
+    scored_games = scored_games.merge(meta, on="game_id", how="left")
+
+---
+
+if HAS_LINEUP:
+    try:
+        scored_games = attach_lineup_features(scored_games, today=today)
+        scored_games = adjust_prob_with_lineup(scored_games)
+    except Exception as e:
+        print(f"[NHL MAIN] lineup adjust skipped: {e}")
+
+
+---
+
+# ✅ lineup에 필요한 팀 정보가 scored_games에 없을 수 있음 → today_df에서 복구
+need_cols = ["game_id", "home_team_id", "away_team_id", "home_team", "away_team", "season"]
+have_cols = [c for c in need_cols if c in today_df.columns]
+
+if have_cols:
+    meta = today_df[have_cols].drop_duplicates(subset=["game_id"])
+    scored_games = scored_games.merge(meta, on="game_id", how="left")
+
+---
+
+
 # nhl_quant_main.py
 
 from __future__ import annotations
