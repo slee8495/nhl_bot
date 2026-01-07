@@ -1,4 +1,65 @@
 
+def _normalize_tricode(x: Any) -> str:
+    s = _norm(x).upper()
+    return s.replace(" ", "")
+
+def _resolve_bdl_team_ids_from_tricodes(tricodes: List[str], client: NHLLineupClient) -> List[int]:
+    """
+    schedule의 home_team_abbr/away_team_abbr(=tricode) -> BDL /teams의 id로 매핑
+    """
+    teams = client.fetch_teams()
+    if teams is None or teams.empty:
+        return []
+
+    teams = teams.copy()
+    teams["tricode_norm"] = teams["tricode"].apply(_normalize_tricode)
+
+    want = {_normalize_tricode(t) for t in tricodes if t}
+    hit = teams[teams["tricode_norm"].isin(want)]
+
+    out = pd.to_numeric(hit["team_id"], errors="coerce").dropna().astype(int).unique().tolist()
+    return out
+
+---
+
+if has_team_ids:
+    raw_ids = pd.concat([df["home_team_id"], df["away_team_id"]], ignore_index=True)
+    raw_ids = pd.to_numeric(raw_ids, errors="coerce")
+    team_ids = raw_ids.dropna().astype(int).drop_duplicates().tolist()
+
+    if not team_ids:
+        print("[NHL LINEUP] team_ids missing after numeric cast -> skip lineup.")
+        return df
+
+    lineup_team = build_lineup_table_for_today(season=season, team_ids=team_ids, today=today, cfg=cfg)
+
+---
+
+if has_team_ids:
+    # ✅ 핵심: NHLDataClient team_id는 BDL team_id와 다를 수 있음
+    # → schedule의 tricode로 BDL team_id를 재구성
+    if ("home_team_abbr" in df.columns) and ("away_team_abbr" in df.columns):
+        tricodes = pd.unique(pd.concat([df["home_team_abbr"], df["away_team_abbr"]]).dropna()).tolist()
+        tricodes = [str(x) for x in tricodes if str(x).strip()]
+
+        bdl_client = NHLLineupClient()
+        team_ids_bdl = _resolve_bdl_team_ids_from_tricodes(tricodes, bdl_client)
+
+        if not team_ids_bdl:
+            print("[NHL LINEUP] could not resolve BDL team_ids from tricodes -> skip lineup.")
+            return df
+
+        lineup_team = build_lineup_table_for_today(season=season, team_ids=team_ids_bdl, today=today, cfg=cfg)
+    else:
+        # abbr 없으면 fallback (정확도 낮음)
+        teams_today = pd.unique(pd.concat([df.get("home_team", pd.Series()), df.get("away_team", pd.Series())]).dropna()).tolist()
+        lineup_team = build_lineup_table_for_today(season=season, team_names=teams_today, today=today, cfg=cfg)
+else:
+    teams_today = pd.unique(pd.concat([df["home_team"], df["away_team"]]).dropna()).tolist()
+    lineup_team = build_lineup_table_for_today(season=season, team_names=teams_today, today=today, cfg=cfg)
+
+---
+
 
 # ✅ schedule(today_games)에서 팀 메타를 scored_games에 강제 주입
 need = ["game_id", "season", "home_team_id", "away_team_id", "home_team", "away_team", "home_team_abbr", "away_team_abbr"]
