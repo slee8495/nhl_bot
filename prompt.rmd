@@ -1,3 +1,19 @@
+# --- Lineup adjustment (robust) ---
+try:
+    from datetime import date as _date
+    from nhl_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
+
+    today = _date.today()  # 또는 네가 이미 갖고 있는 today 변수 사용
+
+    scored_games = attach_lineup_features(scored_games, today=today)
+    scored_games = adjust_prob_with_lineup(scored_games)
+
+except Exception as e:
+    print(f"[NHL MAIN] lineup adjust skipped: {e}")
+
+---
+
+
 print("[NHL LINEUP DEBUG] columns=", list(df.columns))
 print("[NHL LINEUP DEBUG] home_team_id head=", df.get("home_team_id").head(3).tolist() if "home_team_id" in df.columns else None)
 
