@@ -19,7 +19,14 @@ from nhl_performance import update_bet_log_and_summary
 from nhl_strategy_tuning import tune_strategy_from_log
 from email_management import send_nhl_daily_report
 
-from nhl_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
+try:
+    from nhl_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
+    HAS_LINEUP = True
+except ModuleNotFoundError:
+    HAS_LINEUP = False
+    attach_lineup_features = None
+    adjust_prob_with_lineup = None
+    print("[NHL MAIN] nhl_injury_lineup not found -> lineup/injury adjustments disabled.")
 
 
 
@@ -286,15 +293,26 @@ def main():
     win_model = NHLQuantModel.load_from_disk()
     scored_games = win_model.predict_proba(today_df)
 
+    # ✅ lineup에 필요한 팀 정보가 scored_games에 없을 수 있음 → today_df에서 복구
+    need_cols = ["game_id", "home_team_id", "away_team_id", "home_team", "away_team", "season"]
+    have_cols = [c for c in need_cols if c in today_df.columns]
+
+    if have_cols:
+        meta = today_df[have_cols].drop_duplicates(subset=["game_id"])
+        scored_games = scored_games.merge(meta, on="game_id", how="left")
+
+
+
     # ✅ downstream merge 안정화: 오늘 날짜로 고정
     scored_games["date"] = today
 
     # ✅ (5.1) Lineup/Injury features + prob adjust
-    try:
-        scored_games = attach_lineup_features(scored_games, today=today)
-        scored_games = adjust_prob_with_lineup(scored_games)
-    except Exception as e:
-        print(f"[NHL MAIN] lineup adjust skipped: {e}")
+    if HAS_LINEUP:
+        try:
+            scored_games = attach_lineup_features(scored_games, today=today)
+            scored_games = adjust_prob_with_lineup(scored_games)
+        except Exception as e:
+            print(f"[NHL MAIN] lineup adjust skipped: {e}")
 
     # ✅ lineup adjust 후에도 날짜 다시 고정 (안전)
     scored_games["date"] = today

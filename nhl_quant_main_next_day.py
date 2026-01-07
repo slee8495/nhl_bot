@@ -225,6 +225,14 @@ def main():
     scored_games = win_model.predict_proba(today_df)
     scored_games["date"] = slate_date_pt
 
+    # ✅ lineup에 필요한 팀 정보가 scored_games에 없을 수 있음 → today_df에서 복구
+    need_cols = ["game_id", "home_team_id", "away_team_id", "home_team", "away_team", "season"]
+    have_cols = [c for c in need_cols if c in today_df.columns]
+
+    if have_cols:
+        meta = today_df[have_cols].drop_duplicates(subset=["game_id"])
+        scored_games = scored_games.merge(meta, on="game_id", how="left")
+
     # ✅ (5.1) Lineup/Injury features + prob adjust (DROP-IN)
     if HAS_LINEUP:
         try:
