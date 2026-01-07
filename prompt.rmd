@@ -1,3 +1,227 @@
+# nhl_injury_lineup.py
+
+from config import BALLDONTLIE_API_KEY, NHL_BASE_URL, DATA_DIR  # ✅ NHL_BASE_URL 사용
+
+class NHLLineupClient:
+    """
+    balldontlie NHL v1 (GOAT)
+      - GET /teams
+      - GET /players (team_ids[], seasons[])
+      - GET /players/:id/season_stats?season=YYYY
+      - GET /player_injuries
+    Docs: https://api.balldontlie.io/nhl/v1/...  [oai_citation:3‡nhl.balldontlie.io](https://nhl.balldontlie.io/?utm_source=chatgpt.com)
+    """
+
+    TEAMS_PATH = "/teams"
+    PLAYERS_PATH = "/players"
+    PLAYER_INJURIES_PATH = "/player_injuries"
+
+    def __init__(self, api_key=None, base_url=None, max_retries=3):
+        self.api_key = api_key or BALLDONTLIE_API_KEY
+        self.base_url = (base_url or NHL_BASE_URL).rstrip("/")
+        self.max_retries = max_retries
+        if not self.api_key:
+            raise ValueError("BALLDONTLIE_API_KEY missing.")
+
+    def _get(self, path, params=None):
+        if not path.startswith("/"):
+            path = "/" + path
+        url = f"{self.base_url}{path}"
+        headers = {"Authorization": self.api_key, "Accept": "application/json"}
+        params = params or {}
+
+        last_exc = None
+        for i in range(self.max_retries):
+            try:
+                resp = requests.get(url, params=params, headers=headers, timeout=90)
+
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get("Retry-After")
+                    wait_sec = int(retry_after) if (retry_after and retry_after.isdigit()) else 5 * (2 ** i)
+                    print(f"[NHL LINEUP] 429 Too Many Requests. Sleep {wait_sec}s ({i+1}/{self.max_retries})")
+                    time.sleep(wait_sec)
+                    continue
+
+                if resp.status_code in (401, 403):
+                    raise RuntimeError(f"[NHL LINEUP AUTH] {resp.status_code} {url} | {resp.text[:200]}")
+
+                resp.raise_for_status()
+                return resp.json()
+
+            except Exception as e:
+                last_exc = e
+                time.sleep(1.0 * (i + 1))
+
+        raise last_exc
+
+    def fetch_teams(self) -> pd.DataFrame:
+        rows = []
+        cursor = None
+        while True:
+            params = {"per_page": 100}
+            if cursor is not None:
+                params["cursor"] = cursor
+            data = self._get(self.TEAMS_PATH, params=params)
+            items = data.get("data", []) or []
+            if not items:
+                break
+
+            for t in items:
+                rows.append(
+                    {
+                        "team_id": t.get("id"),
+                        "full_name": t.get("full_name"),
+                        "tricode": t.get("tricode"),
+                        "conference_name": t.get("conference_name"),
+                        "division_name": t.get("division_name"),
+                    }
+                )
+
+            meta = data.get("meta", {}) or {}
+            next_cursor = meta.get("next_cursor")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+
+        return pd.DataFrame(rows)
+
+    def fetch_players(self, season: int, team_ids: list[int]) -> pd.DataFrame:
+        """
+        GET /players?seasons[]=2024&team_ids[]=61...
+        """
+        rows = []
+        cursor = None
+        while True:
+            params = {"per_page": 100, "seasons[]": int(season)}
+            params["team_ids[]"] = [int(t) for t in team_ids]
+
+            if cursor is not None:
+                params["cursor"] = cursor
+
+            data = self._get(self.PLAYERS_PATH, params=params)
+            items = data.get("data", []) or []
+            if not items:
+                break
+
+            rows.extend(items)
+            meta = data.get("meta", {}) or {}
+            next_cursor = meta.get("next_cursor")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+
+        return pd.DataFrame(rows)
+
+    def fetch_player_season_stats(self, player_id: int, season: int) -> dict:
+        """
+        GET /players/:id/season_stats?season=2024  [oai_citation:4‡nhl.balldontlie.io](https://nhl.balldontlie.io/?utm_source=chatgpt.com)
+        """
+        return self._get(f"/players/{int(player_id)}/season_stats", params={"season": int(season)})
+
+    def fetch_player_injuries(self, team_ids: list[int] | None = None) -> pd.DataFrame:
+        """
+        GET /player_injuries?team_ids[]=...
+        """
+        rows = []
+        cursor = None
+        while True:
+            params = {"per_page": 100}
+            if cursor is not None:
+                params["cursor"] = cursor
+            if team_ids:
+                params["team_ids[]"] = [int(t) for t in team_ids]
+
+            data = self._get(self.PLAYER_INJURIES_PATH, params=params)
+            items = data.get("data", []) or []
+            if not items:
+                break
+
+            rows.extend(items)
+            meta = data.get("meta", {}) or {}
+            next_cursor = meta.get("next_cursor")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+
+        return pd.DataFrame(rows)
+
+
+
+
+---
+
+
+client = NHLLineupClient()
+
+# ✅ 1) players list (팀/시즌 필터)
+players = client.fetch_players(season=season, team_ids=team_ids)
+if players.empty:
+    print("[NHL LINEUP] players empty → skip.")
+    return pd.DataFrame()
+
+# ✅ 2) player season stats (player별 호출)
+rows = []
+for _, p in players.iterrows():
+    pid = _safe_int(p.get("id"))
+    if pid is None:
+        continue
+
+    try:
+        payload = client.fetch_player_season_stats(player_id=pid, season=season)
+        data = payload.get("data")
+
+        # data가 dict 또는 list일 수 있어 안전 처리
+        if isinstance(data, dict):
+            data = [data]
+        if not data:
+            data = []
+
+        st = data[0] if data else {}
+
+        team = p.get("team") if isinstance(p.get("team"), dict) else {}
+        team_id = _safe_int(team.get("id")) or _safe_int(p.get("team_id"))
+        team_name = team.get("full_name") or team.get("name")
+
+        first = p.get("first_name") or ""
+        last = p.get("last_name") or ""
+        player_name = (f"{first} {last}").strip()
+
+        pos = p.get("position") or ""
+        is_goalie = 1 if _norm(pos) in ("g", "goalie", "goaltender") else 0
+
+        # ⚠️ NHL season_stats 필드명은 "points/goals/assists/toi" 계열일 가능성이 큼 (best-effort)
+        toi = st.get("toi") or st.get("time_on_ice") or st.get("avg_toi") or 0
+        pts = st.get("points") or st.get("pts") or 0
+        g = st.get("goals") or st.get("g") or 0
+        a = st.get("assists") or st.get("a") or 0
+
+        rows.append({
+            "player_id": pid,
+            "player_name": player_name,
+            "team_id": team_id,
+            "team_name": team_name,
+            "position": pos,
+            "toi": _safe_float(toi, 0.0),
+            "pts": _safe_float(pts, 0.0),
+            "g": _safe_float(g, 0.0),
+            "a": _safe_float(a, 0.0),
+            "is_goalie": int(is_goalie),
+        })
+
+    except Exception as e:
+        print(f"[NHL LINEUP DEBUG] season_stats failed pid={pid} err={type(e).__name__}: {e}")
+        continue
+
+season_avg = pd.DataFrame(rows)
+if season_avg.empty:
+    print("[NHL LINEUP] season_avgs empty (players+season_stats). Skip lineup.")
+    return pd.DataFrame()
+
+# ✅ injuries (팀만 필터)
+inj_df = client.fetch_player_injuries(team_ids=team_ids)
+
+--
+
 
 
 음.. 이렇게 접근해보자. 
