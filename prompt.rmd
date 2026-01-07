@@ -1,3 +1,286 @@
+
+def build_lineup_table_for_today(
+    season: int,
+    team_ids: Optional[List[int]] = None,
+    team_names: Optional[List[str]] = None,
+    today: Optional[_date] = None,
+    cfg: NHLLineupConfig | None = None,
+) -> pd.DataFrame:
+    """
+    Output: team-level features
+      - team_id, team_name, season
+      - lineup_depth_score
+      - lineup_missing_star_count
+      - lineup_missing_star_score
+      - goalie_out_flag
+      - goalie_missing_score
+    """
+    cfg = cfg or NHLLineupConfig()
+    today = today or _date.today()
+
+    # -----------------------------
+    # season normalize (BDL expects start year)
+    # -----------------------------
+    season_bdl = _normalize_bdl_season(season)
+
+    # -----------------------------
+    # NHL은 team_ids 없으면 정확도가 너무 떨어짐 → 스킵 권장
+    # -----------------------------
+    if not team_ids:
+        print("[NHL LINEUP] team_ids missing -> skip lineup (NHL needs team_ids).")
+        return pd.DataFrame()
+
+    team_ids = [int(x) for x in team_ids if x is not None]
+
+    client = NHLLineupClient()
+
+    # ==========================================================
+    # 1) players list (team_ids + season)
+    # ==========================================================
+    players = client.fetch_players(season=season_bdl, team_ids=team_ids)
+    if players is None or players.empty:
+        print("[NHL LINEUP] players empty -> skip.")
+        return pd.DataFrame()
+
+    # ==========================================================
+    # 2) player season stats (player별 호출) -> df_sa 생성
+    # ==========================================================
+    rows = []
+    for _, p in players.iterrows():
+        pid = _safe_int(p.get("id"))
+        if pid is None:
+            continue
+
+        try:
+            payload = client.fetch_player_season_stats(player_id=pid, season=season_bdl)
+            data = payload.get("data")
+
+            # data가 dict 또는 list일 수 있음
+            if isinstance(data, dict):
+                data = [data]
+            st = (data[0] if (isinstance(data, list) and len(data) > 0) else {}) or {}
+
+            team = p.get("team") if isinstance(p.get("team"), dict) else {}
+            team_id = _safe_int(team.get("id")) or _safe_int(p.get("team_id"))
+            team_name = team.get("full_name") or team.get("name") or p.get("team_name")
+
+            first = p.get("first_name") or ""
+            last = p.get("last_name") or ""
+            player_name = (f"{first} {last}").strip() or p.get("full_name") or str(pid)
+
+            pos = p.get("position") or ""
+            is_goalie = 1 if _norm(pos) in ("g", "goalie", "goaltender") else 0
+
+            # best-effort stat keys
+            toi = st.get("toi") or st.get("time_on_ice") or st.get("avg_toi") or 0
+            pts = st.get("points") or st.get("pts") or 0
+            g = st.get("goals") or st.get("g") or 0
+            a = st.get("assists") or st.get("a") or 0
+
+            rows.append(
+                {
+                    "player_id": pid,
+                    "player_name": player_name,
+                    "team_id": team_id,
+                    "team_name": team_name,
+                    "position": pos,
+                    "toi": _safe_float(toi, 0.0),
+                    "pts": _safe_float(pts, 0.0),
+                    "g": _safe_float(g, 0.0),
+                    "a": _safe_float(a, 0.0),
+                    "is_goalie": int(is_goalie),
+                }
+            )
+
+        except Exception as e:
+            print(f"[NHL LINEUP DEBUG] season_stats failed pid={pid} err={type(e).__name__}: {e}")
+            continue
+
+    df_sa = pd.DataFrame(rows)
+    if df_sa.empty:
+        print("[NHL LINEUP] season_avgs empty (players+season_stats). Skip lineup.")
+        return pd.DataFrame()
+
+    # ==========================================================
+    # 3) injuries (team_ids 필터) -> inj 정규화
+    # ==========================================================
+    inj_raw = client.fetch_player_injuries(team_ids=team_ids)
+    if inj_raw is None or inj_raw.empty:
+        inj = pd.DataFrame()
+    else:
+        inj = inj_raw.copy()
+
+        def _get_player_name(x: Any) -> str:
+            if isinstance(x, dict):
+                fn = x.get("first_name") or ""
+                ln = x.get("last_name") or ""
+                return (f"{fn} {ln}").strip()
+            return ""
+
+        def _get_team_id(x: Any) -> Optional[int]:
+            if isinstance(x, dict):
+                return _safe_int(x.get("id"))
+            return None
+
+        def _get_team_name(x: Any) -> str:
+            if isinstance(x, dict):
+                return x.get("full_name") or x.get("name") or ""
+            return ""
+
+        if "player_name" not in inj.columns:
+            if "player" in inj.columns:
+                inj["player_name"] = inj["player"].apply(_get_player_name)
+            else:
+                inj["player_name"] = ""
+
+        if "team_id" not in inj.columns:
+            if "team" in inj.columns:
+                inj["team_id"] = inj["team"].apply(_get_team_id)
+            else:
+                if "player" in inj.columns:
+                    inj["team_id"] = inj["player"].apply(
+                        lambda d: _safe_int(d.get("team_id")) if isinstance(d, dict) else None
+                    )
+                else:
+                    inj["team_id"] = None
+
+        if "team_name" not in inj.columns:
+            if "team" in inj.columns:
+                inj["team_name"] = inj["team"].apply(_get_team_name)
+            else:
+                inj["team_name"] = ""
+
+        if "status" not in inj.columns:
+            inj["status"] = inj.get("injury_status", "") if "injury_status" in inj.columns else ""
+
+        inj["team_id_int"] = pd.to_numeric(inj["team_id"], errors="coerce").fillna(-1).astype(int)
+        inj["player_name_norm"] = inj["player_name"].apply(_norm)
+        inj["status_out"] = inj["status"].apply(lambda x: _is_out_status(x, cfg))
+
+    # ==========================================================
+    # df_sa 컬럼/타입 정리
+    # ==========================================================
+    for c in ["team_id", "team_name", "player_name", "position"]:
+        if c not in df_sa.columns:
+            df_sa[c] = np.nan
+
+    if "is_goalie" not in df_sa.columns:
+        df_sa["is_goalie"] = df_sa["position"].apply(lambda x: 1 if _norm(x) in ("g", "goalie", "goaltender") else 0)
+
+    for c in ["toi", "pts", "g", "a", "is_goalie"]:
+        if c not in df_sa.columns:
+            df_sa[c] = 0
+
+    df_sa["team_id_int"] = pd.to_numeric(df_sa["team_id"], errors="coerce").fillna(-1).astype(int)
+    df_sa["toi"] = pd.to_numeric(df_sa["toi"], errors="coerce").fillna(0.0)
+    df_sa["pts"] = pd.to_numeric(df_sa["pts"], errors="coerce").fillna(0.0)
+    df_sa["g"] = pd.to_numeric(df_sa["g"], errors="coerce").fillna(0.0)
+    df_sa["a"] = pd.to_numeric(df_sa["a"], errors="coerce").fillna(0.0)
+    df_sa["is_goalie"] = pd.to_numeric(df_sa["is_goalie"], errors="coerce").fillna(0).astype(int)
+
+    # team filter (team_ids 기반)
+    keep = set(int(x) for x in team_ids if x is not None)
+    df_sa = df_sa[df_sa["team_id_int"].isin(keep)].copy()
+
+    if df_sa.empty:
+        print("[NHL LINEUP] season_avgs filtered empty. Skip lineup.")
+        return pd.DataFrame()
+
+    # ==========================================================
+    # Build per-team
+    # ==========================================================
+    out_rows: List[Dict[str, Any]] = []
+    team_keys = sorted(df_sa["team_id_int"].unique().tolist())
+
+    for tid in team_keys:
+        team_df = df_sa[df_sa["team_id_int"] == tid].copy()
+        if team_df.empty:
+            continue
+
+        team_name = (
+            str(team_df["team_name"].dropna().iloc[0])
+            if team_df["team_name"].notna().any()
+            else str(tid)
+        )
+
+        # rotation: skaters only
+        skaters = team_df[team_df["is_goalie"] == 0].copy().sort_values("toi", ascending=False)
+        rotation = skaters[skaters["toi"] >= float(cfg.min_toi_rotation)].copy()
+        if rotation.empty:
+            rotation = skaters.copy()
+
+        baseline_total_toi = float(rotation["toi"].sum())
+        if baseline_total_toi <= 0:
+            baseline_total_toi = 1.0
+
+        # star scoring
+        team_df_scored = _compute_star_scores(team_df, cfg)
+        stars = (
+            team_df_scored[team_df_scored["is_goalie"] == 0]
+            .sort_values("star_score", ascending=False)
+            .head(int(cfg.top_n_stars))
+            .copy()
+        )
+        star_names = set(stars["player_name"].dropna().astype(str).tolist())
+        star_score_map = dict(zip(stars["player_name"].astype(str), stars["star_score"].astype(float)))
+
+        # goalie pick
+        goalie = _pick_goalie(team_df_scored, cfg)
+        goalie_name = str(goalie.get("player_name")) if goalie else None
+        goalie_score = float(cfg.goalie_score_clip) if goalie and cfg.goalie_is_star else 0.0
+
+        # OUT list (by injuries)
+        out_names: set[str] = set()
+        if inj is not None and (not inj.empty):
+            inj_team = inj[(inj["team_id_int"] == int(tid)) & (inj["status_out"])].copy()
+            if not inj_team.empty:
+                out_names = set(inj_team["player_name_norm"].dropna().astype(str).tolist())
+
+        # availability among rotation by name matching
+        rotation["player_name_norm"] = rotation["player_name"].apply(_norm)
+        rotation["is_available"] = ~rotation["player_name_norm"].isin(out_names)
+
+        active_toi = float(rotation.loc[rotation["is_available"], "toi"].sum())
+        depth_score = float(np.clip(active_toi / baseline_total_toi, float(cfg.depth_clip_min), float(cfg.depth_clip_max)))
+
+        # missing stars
+        missing_star_score = 0.0
+        missing_star_count = 0
+        for pn in star_names:
+            if _norm(pn) in out_names:
+                missing_star_count += 1
+                missing_star_score += float(star_score_map.get(str(pn), 0.0))
+
+        missing_star_score = float(
+            np.clip(missing_star_score, 0.0, float(cfg.star_score_clip) * float(cfg.top_n_stars))
+        )
+
+        # goalie out
+        goalie_out_flag = 0
+        goalie_missing_score = 0.0
+        if goalie_name and (_norm(goalie_name) in out_names):
+            goalie_out_flag = 1
+            goalie_missing_score = float(np.clip(goalie_score, 0.0, float(cfg.goalie_score_clip)))
+
+        out_rows.append(
+            {
+                "team_id": int(tid),
+                "team_name": team_name,
+                "season": int(season),
+                "lineup_depth_score": depth_score,
+                "lineup_missing_star_count": int(missing_star_count),
+                "lineup_missing_star_score": float(missing_star_score),
+                "goalie_out_flag": int(goalie_out_flag),
+                "goalie_missing_score": float(goalie_missing_score),
+            }
+        )
+
+    return pd.DataFrame(out_rows) if out_rows else pd.DataFrame()
+
+
+---
+
+
 # nhl_injury_lineup.py
 from __future__ import annotations
 
