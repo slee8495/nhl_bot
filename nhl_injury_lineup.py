@@ -875,6 +875,8 @@ def attach_lineup_features(
                 f"- coverage(min(home,away))={coverage:.2f} (need >= {cfg.min_team_coverage:.2f})\n"
                 "→ Abort to avoid trading on bad lineup signal."
             )
+        
+    
 
     return df
 
