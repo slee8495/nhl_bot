@@ -24,11 +24,6 @@ def _norm(s: Any) -> str:
     return " ".join(s.lower().strip().split())
 
 
-def _chunked(lst: List[Any], n: int):
-    for i in range(0, len(lst), n):
-        yield lst[i : i + n]
-
-
 def _safe_int(x) -> Optional[int]:
     try:
         if pd.isna(x):
@@ -50,54 +45,52 @@ def _safe_float(x, default=0.0) -> float:
 def _clip_prob(p: float) -> float:
     return float(np.clip(p, 0.01, 0.99))
 
+def _normalize_bdl_season(season: int) -> int:
+    """
+    balldontlie NHL season 파라미터는 보통 '시즌 시작 연도'(예: 2024)를 기대.
+    네 봇에서 season이 20252026 같은 형태로 들어올 가능성도 있어서 안전 변환.
+    """
+    s = int(season)
+    if s >= 10_000_000:      # e.g., 20252026
+        return s // 10000    # -> 2025
+    if s >= 1_000_000:       # e.g., 20242025
+        return s // 10000    # -> 2024
+    return s
+
 
 # ==========================================================
 # Config
 # ==========================================================
 @dataclass
 class NHLLineupConfig:
-    """
-    NHL lineup/injury adjustment config (MVP).
+    min_toi_rotation: float = 12.0
+    top_n_stars: int = 3
 
-    핵심 아이디어:
-      - '스타/골리 결장'은 NHL에서 매우 큰 신호
-      - depth(출전시간 커버리지)도 중요하지만, 스타/골리보다 2순위
-      - 데이터 소스가 불안정할 수 있으니 fail-soft가 기본
-    """
-
-    # --- rotation 기준 (TOI = time on ice)
-    min_toi_rotation: float = 12.0     # 평균 TOI >= 12분이면 로테이션급(포워드/디펜더)
-    top_n_stars: int = 3               # team 내 impact 상위 N명을 스타로 간주
-
-    # depth score clip
     depth_clip_min: float = 0.0
     depth_clip_max: float = 1.2
 
-    # 로짓 가중치
-    depth_weight: float = 0.15         # depth_diff 1.0 -> logit +0.15
-    star_penalty: float = 0.20         # 스타 score 차이 -> logit 영향
-    goalie_penalty: float = 0.55       # 주전 골리 결장 -> logit 영향 (NHL에서 큼)
+    depth_weight: float = 0.15
+    star_penalty: float = 0.20
+    goalie_penalty: float = 0.55
     goalie_is_star: bool = True
 
-    # 스타 점수 구성
     star_min_toi_for_rank: float = 14.0
     star_score_clip: float = 3.0
     star_weight_pts: float = 1.00
     star_weight_g: float = 1.20
     star_weight_a: float = 0.80
-    # (선택) +/-, xG 등 넣고 싶으면 여기에 추가하면 됨
 
-    # goalie 점수 구성
-    goalie_min_toi_for_rank: float = 35.0   # 골리는 평균 TOI(분)가 크므로 별도 기준
+    goalie_min_toi_for_rank: float = 35.0
     goalie_score_clip: float = 2.5
 
-    # OUT 판정
-    # - 확정 결장에 가까운 status만 OUT로 처리 (오탐 방지)
     out_keywords: tuple[str, ...] = ("out", "doubtful", "ir", "injured reserve", "suspended")
 
-    # fail-hard 옵션 (기본은 False 추천: NHL 데이터 소스 불안정할 수 있음)
     fail_hard_if_lineup_bad: bool = False
-    min_team_coverage: float = 0.85  # 홈/원정 join 성공률 최소
+    min_team_coverage: float = 0.85
+
+    # API 호출량 줄이기용 캐시
+    cache_dir: str = DATA_DIR
+    cache_ttl_hours: int = 24
 
 
 # ==========================================================
@@ -105,18 +98,11 @@ class NHLLineupConfig:
 # ==========================================================
 class NHLLineupClient:
     """
-    ⚠️ NHL lineup/injury 데이터는 공급자에 따라 endpoint가 다를 수 있음.
-    그래서 MVP는:
-      - API candidate_paths를 여러 개 두고,
-      - 404면 다음 경로로 넘어가며,
-      - 최종적으로는 CSV override로도 돌아가게 설계한다.
-
-    CSV override (선택):
-      - DATA_DIR/nhl_injuries_today.csv
-        columns (권장): team_id, team_name, player_name, position, status, is_goalie(0/1), is_star(0/1), impact_score(optional)
-
-      - DATA_DIR/nhl_player_season_avgs.csv
-        columns (권장): player_id(optional), team_id, team_name, player_name, position, toi, pts, g, a, is_goalie(0/1)
+    balldontlie NHL GOAT 플랜 기준:
+      - GET /players (team_ids[], seasons[])  -> 선수 목록
+      - GET /players/{id}/season_stats?season=YYYY -> 선수 시즌 스탯
+      - GET /player_injuries -> 부상 목록
+    base_url 는 반드시 .../nhl/v1 로 들어와야 한다.
     """
 
     def __init__(
@@ -126,16 +112,16 @@ class NHLLineupClient:
         max_retries: int = 3,
     ):
         self.api_key = api_key or BALLDONTLIE_API_KEY
-        self.base_url = (base_url or BALLDONTLIE_BASE_URL).rstrip("/")
+        self.base_url = (base_url or NHL_BASE_URL).rstrip("/")
         self.max_retries = max_retries
-
-        # API key가 없더라도 CSV fallback로는 돌아갈 수 있게 한다.
-        # 하지만 API 호출을 하려면 필요.
-        # (여기서 raise 하지 않음)
 
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not self.api_key:
             raise RuntimeError("BALLDONTLIE_API_KEY missing (API fetch disabled).")
+
+        # path는 '/players' 같은 형태만 허용 (리그 prefix 넣지 말기)
+        if not path.startswith("/"):
+            path = "/" + path
 
         url = f"{self.base_url}{path}"
         headers = {"Authorization": self.api_key, "Accept": "application/json"}
@@ -156,11 +142,15 @@ class NHLLineupClient:
                     time.sleep(wait_sec)
                     continue
 
+                # GOAT인데도 401/403이면 key/헤더/URL 문제
+                if resp.status_code in (401, 403):
+                    raise RuntimeError(f"[NHL LINEUP AUTH] {resp.status_code} {url} | {resp.text[:200]}")
+
                 resp.raise_for_status()
                 return resp.json()
+
             except Exception as e:
                 last_exc = e
-                # 즉시 재시도
                 time.sleep(1.0 * (i + 1))
 
         raise last_exc
@@ -173,159 +163,184 @@ class NHLLineupClient:
         path = path or os.path.join(DATA_DIR, "nhl_player_season_avgs.csv")
         if not os.path.exists(path):
             return pd.DataFrame()
-        df = pd.read_csv(path)
-        return df
+        return pd.read_csv(path)
 
     @staticmethod
     def load_csv_injuries_today(path: Optional[str] = None) -> pd.DataFrame:
         path = path or os.path.join(DATA_DIR, "nhl_injuries_today.csv")
         if not os.path.exists(path):
             return pd.DataFrame()
-        df = pd.read_csv(path)
+        return pd.read_csv(path)
+
+    # -------------------------
+    # Cache helpers
+    # -------------------------
+    def _cache_path(self, name: str) -> str:
+        return os.path.join(DATA_DIR, name)
+
+    def _cache_valid(self, fp: str, ttl_hours: int) -> bool:
+        if not os.path.exists(fp):
+            return False
+        age_sec = time.time() - os.path.getmtime(fp)
+        return age_sec <= ttl_hours * 3600
+
+    # -------------------------
+    # API fetchers (NHL)
+    # -------------------------
+    def fetch_players_for_teams(self, team_ids: List[int], season: int) -> pd.DataFrame:
+        """
+        /players?team_ids[]=..&seasons[]=YYYY
+        pagination(meta.next_cursor) 대응
+        """
+        season = _normalize_bdl_season(season)
+
+        # 캐시 (슬레이트 team_ids 조합이 자주 반복되면 좋아짐)
+        key = f"nhl_players_{season}_{'_'.join(map(str, sorted(team_ids)))}.csv"
+        fp = self._cache_path(key)
+        if self._cache_valid(fp, ttl_hours=24):
+            return pd.read_csv(fp)
+
+        rows: List[Dict[str, Any]] = []
+        cursor = None
+
+        while True:
+            params: Dict[str, Any] = {"per_page": 100, "seasons[]": season}
+            # requests는 같은 key에 list 넣으면 team_ids[]=1&team_ids[]=2 로 나감
+            params["team_ids[]"] = [int(t) for t in team_ids]
+
+            if cursor is not None:
+                params["cursor"] = cursor
+
+            data = self._get("/players", params=params)
+            items = data.get("data") or []
+            rows.extend(items)
+
+            meta = data.get("meta") or {}
+            cursor = meta.get("next_cursor")
+            if not cursor:
+                break
+
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df.to_csv(fp, index=False)
         return df
 
-    # -------------------------
-    # API fetchers (best-effort)
-    # -------------------------
-    def fetch_player_season_avgs(self, season: int) -> pd.DataFrame:
-        """
-        NHL player season averages.
-        Candidate endpoints are intentionally flexible.
+    def fetch_player_season_stats(self, player_id: int, season: int) -> Dict[str, Any]:
+        season = _normalize_bdl_season(season)
+        return self._get(f"/players/{int(player_id)}/season_stats", params={"season": season})
 
-        Expected output columns (best-effort):
-          - player_id(optional)
-          - player_name
-          - team_id
-          - team_name
-          - position
-          - toi (avg minutes)
-          - pts, g, a
-          - is_goalie (0/1)
+    def fetch_player_season_avgs(self, season: int, team_ids: List[int]) -> pd.DataFrame:
         """
-        # ⚠️ 공급자마다 다르니 "있으면 파싱" 전략
-        candidate_paths = [
-            "/nhl/v1/player_season_averages",
-            "/nhl/v1/season_averages/players",
-            "/v1/nhl/player_season_averages",
-        ]
+        우리가 필요한 형태로 reshape:
+          team_id, team_name, player_id, player_name, position, toi, pts, g, a, is_goalie
+        """
+        season = _normalize_bdl_season(season)
 
-        for path in candidate_paths:
+        # 전체 결과 캐시 (매일 슬레이트 팀 기준)
+        key = f"nhl_season_avgs_{season}_{'_'.join(map(str, sorted(team_ids)))}.csv"
+        fp = self._cache_path(key)
+        if self._cache_valid(fp, ttl_hours=24):
+            return pd.read_csv(fp)
+
+        players = self.fetch_players_for_teams(team_ids=team_ids, season=season)
+        if players is None or players.empty:
+            print("[NHL LINEUP] players empty from API.")
+            return pd.DataFrame()
+
+        # balldontlie players schema: id, first_name, last_name, position, team{ id, full_name, ... }
+        rows: List[Dict[str, Any]] = []
+        for _, p in players.iterrows():
+            pid = _safe_int(p.get("id"))
+            if pid is None:
+                continue
+
             try:
-                data = self._get(path, params={"season": season, "per_page": 200})
-                items = data.get("data", []) or []
-                if not items:
-                    continue
+                stats_payload = self.fetch_player_season_stats(player_id=pid, season=season)
+                # season_stats는 보통 data가 리스트(팀/시즌별 1개)일 수 있음
+                stats_items = stats_payload.get("data")
+                if isinstance(stats_items, dict):
+                    stats_items = [stats_items]
+                if not stats_items:
+                    stats_items = []
 
-                rows: List[Dict[str, Any]] = []
-                for it in items:
-                    p = it.get("player", {}) or it.get("athlete", {}) or {}
-                    t = it.get("team", {}) or {}
-                    stats = it.get("stats", {}) or it
+                # players에 team 정보가 있음
+                team = p.get("team") if isinstance(p.get("team"), dict) else {}
+                team_id = _safe_int(team.get("id")) or _safe_int(p.get("team_id"))
+                team_name = team.get("full_name") or team.get("name") or p.get("team_name")
 
-                    name = (
-                        stats.get("player_name")
-                        or p.get("full_name")
-                        or f"{p.get('first_name','')} {p.get('last_name','')}".strip()
-                    )
+                first = p.get("first_name") or ""
+                last = p.get("last_name") or ""
+                player_name = (f"{first} {last}").strip() or p.get("full_name") or str(pid)
 
-                    pos = stats.get("position") or p.get("position") or ""
-                    pos_norm = _norm(pos)
-                    is_goalie = 1 if pos_norm in ("g", "goalie", "goaltender") else 0
+                position = p.get("position") or ""
+                pos_norm = _norm(position)
+                is_goalie = 1 if pos_norm in ("g", "goalie", "goaltender") else 0
 
-                    # common stat keys
-                    toi = (
-                        stats.get("toi")
-                        or stats.get("avg_toi")
-                        or stats.get("time_on_ice")
-                        or 0
-                    )
+                # stats key는 공급자/버전에 따라 조금씩 다를 수 있어 best-effort
+                # 우선 1개(대부분 1개)만 사용
+                st = stats_items[0] if len(stats_items) > 0 else {}
 
-                    rows.append(
-                        {
-                            "player_id": p.get("id"),
-                            "player_name": name,
-                            "team_id": t.get("id") or stats.get("team_id"),
-                            "team_name": t.get("full_name") or stats.get("team_name"),
-                            "position": pos,
-                            "toi": _safe_float(toi, 0.0),
-                            "pts": _safe_float(stats.get("pts", stats.get("points", 0)), 0.0),
-                            "g": _safe_float(stats.get("g", stats.get("goals", 0)), 0.0),
-                            "a": _safe_float(stats.get("a", stats.get("assists", 0)), 0.0),
-                            "is_goalie": int(is_goalie),
-                        }
-                    )
+                # TOI는 분 단위 average가 아니라 시즌 total일 수 있음 -> 너 로직은 "rotation proxy"라서
+                # total TOI라도 상대 비교는 의미가 있어. (원하면 나중에 avg로 정규화 가능)
+                toi = (
+                    st.get("toi")
+                    or st.get("time_on_ice")
+                    or st.get("avg_toi")
+                    or 0
+                )
 
-                df = pd.DataFrame(rows)
-                if not df.empty:
-                    return df
-            except requests.HTTPError as e:
-                if getattr(e, "response", None) is not None and e.response.status_code == 404:
-                    continue
-                # 다른 5xx 등은 그냥 실패로 두고 다음 path로
+                pts = st.get("pts") or st.get("points") or 0
+                g = st.get("g") or st.get("goals") or 0
+                a = st.get("a") or st.get("assists") or 0
+
+                rows.append(
+                    {
+                        "player_id": pid,
+                        "player_name": player_name,
+                        "team_id": team_id,
+                        "team_name": team_name,
+                        "position": position,
+                        "toi": _safe_float(toi, 0.0),
+                        "pts": _safe_float(pts, 0.0),
+                        "g": _safe_float(g, 0.0),
+                        "a": _safe_float(a, 0.0),
+                        "is_goalie": int(is_goalie),
+                    }
+                )
+
+            except Exception as e:
+                # 여기서 조용히 삼키면 또 원인 파악 어려움 -> 로그 남김
+                print(f"[NHL LINEUP DEBUG] season_stats failed player_id={pid} err={type(e).__name__}: {e}")
                 continue
-            except Exception:
-                continue
 
-        return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df.to_csv(fp, index=False)
+        return df
 
     def fetch_injuries_today(self, day: _date) -> pd.DataFrame:
         """
-        NHL injuries today (best-effort).
-        Expected columns:
-          - player_id(optional), player_name, team_id/team_name, position, status, is_goalie(optional)
+        balldontlie NHL: /player_injuries (date 파라미터 없이 전체/현재 부상 리스트 형태)
+        day는 인터페이스 유지용 (로그/캐시 키에만 사용)
         """
-        candidate_paths = [
-            "/nhl/v1/player_injuries",
-            "/nhl/v1/injuries",
-            "/v1/nhl/player_injuries",
-        ]
+        key = f"nhl_injuries_{str(day)}.csv"
+        fp = self._cache_path(key)
+        if self._cache_valid(fp, ttl_hours=6):
+            return pd.read_csv(fp)
 
-        for path in candidate_paths:
-            try:
-                data = self._get(path, params={"date": str(day), "per_page": 200})
-                items = data.get("data", []) or []
-                if not items:
-                    continue
+        try:
+            data = self._get("/player_injuries", params={"per_page": 100})
+            items = data.get("data") or []
+            df = pd.DataFrame(items)
+            if not df.empty:
+                df.to_csv(fp, index=False)
+            return df
+        except Exception as e:
+            print(f"[NHL LINEUP DEBUG] injuries fetch failed err={type(e).__name__}: {e}")
+            return pd.DataFrame()
+        
 
-                rows: List[Dict[str, Any]] = []
-                for inj in items:
-                    p = inj.get("player", {}) or inj.get("athlete", {}) or {}
-                    t = inj.get("team", {}) or {}
-                    status = inj.get("status") or inj.get("injury_status") or inj.get("designation") or ""
-
-                    pos = inj.get("position") or p.get("position") or ""
-                    pos_norm = _norm(pos)
-                    is_goalie = 1 if pos_norm in ("g", "goalie", "goaltender") else 0
-
-                    name = (
-                        inj.get("player_name")
-                        or p.get("full_name")
-                        or f"{p.get('first_name','')} {p.get('last_name','')}".strip()
-                    )
-
-                    rows.append(
-                        {
-                            "player_id": p.get("id"),
-                            "player_name": name,
-                            "team_id": t.get("id") or inj.get("team_id"),
-                            "team_name": t.get("full_name") or inj.get("team_name"),
-                            "position": pos,
-                            "status": status,
-                            "is_goalie": int(is_goalie),
-                        }
-                    )
-
-                df = pd.DataFrame(rows)
-                if not df.empty:
-                    return df
-            except requests.HTTPError as e:
-                if getattr(e, "response", None) is not None and e.response.status_code == 404:
-                    continue
-                continue
-            except Exception:
-                continue
-
-        return pd.DataFrame()
+        
 
 
 # ==========================================================
