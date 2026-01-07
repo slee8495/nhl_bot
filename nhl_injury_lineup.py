@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from config import BALLDONTLIE_API_KEY, BALLDONTLIE_BASE_URL, DATA_DIR
+from config import BALLDONTLIE_API_KEY, NHL_BASE_URL, DATA_DIR
 
 
 # ==========================================================
