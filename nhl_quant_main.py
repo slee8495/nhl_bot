@@ -293,18 +293,36 @@ def main():
     win_model = NHLQuantModel.load_from_disk()
     scored_games = win_model.predict_proba(today_df)
 
-    # ✅ scored_games가 edge/lineup에 필요한 팀 컬럼을 잃어버릴 수 있음
-    # ✅ source-of-truth = today_games (schedule)
+    # ✅ schedule(today_games)에서 팀 메타를 scored_games에 강제 주입
     need = ["game_id", "season", "home_team_id", "away_team_id", "home_team", "away_team", "home_team_abbr", "away_team_abbr"]
     have = [c for c in need if c in today_games.columns]
 
+    # (A) scored_games에 같은 이름 컬럼이 이미 있으면 suffix 문제 생김 → 먼저 제거
+    dup_cols = [c for c in need if c != "game_id" and c in scored_games.columns]
+    if dup_cols:
+        scored_games = scored_games.drop(columns=dup_cols, errors="ignore")
+
+    # (B) merge
     if have:
-        meta = today_games[have].drop_duplicates(subset=["game_id"])
+        meta = today_games[have].drop_duplicates(subset=["game_id"]).copy()
+        scored_games["game_id"] = pd.to_numeric(scored_games["game_id"], errors="coerce")
+        meta["game_id"] = pd.to_numeric(meta["game_id"], errors="coerce")
         scored_games = scored_games.merge(meta, on="game_id", how="left")
 
-    # ✅ 방어: home/away team은 edge에서 필수
+    # (C) 최소 필수 컬럼 보장 (edge/lineup이 필요)
     if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
-        raise RuntimeError("[NHL MAIN] scored_games missing home_team/away_team after merge (schedule meta join failed).")
+        # suffix가 생긴 경우까지 커버 (혹시 남아있다면)
+        for side in ["home_team", "away_team"]:
+            if side not in scored_games.columns:
+                if f"{side}_y" in scored_games.columns:
+                    scored_games[side] = scored_games[f"{side}_y"]
+                elif f"{side}_x" in scored_games.columns:
+                    scored_games[side] = scored_games[f"{side}_x"]
+
+    if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
+        raise RuntimeError("[NHL MAIN] scored_games missing home_team/away_team after schedule meta join.")
+
+
 
 
 
