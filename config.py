@@ -8,7 +8,7 @@ load_dotenv()
 # =========================
 # Risk / Bankroll
 # =========================
-NHL_TOTAL_DAILY_RISK = 100
+NHL_TOTAL_DAILY_RISK = 118
 
 
 # =========================
