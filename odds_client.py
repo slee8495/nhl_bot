@@ -78,9 +78,30 @@ class OddsAPIClient:
     def _get_bdl(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         url = f"{self.bdl_base}{path}"
         headers = {"Authorization": self.bdl_key, "Accept": "application/json"}
-        resp = requests.get(url, params=(params or {}), headers=headers, timeout=90)
+        params = (params or {}).copy()
+
+        # ✅ hard cap per_page (API 400 방지)
+        if "per_page" in params:
+            try:
+                params["per_page"] = max(1, min(int(params["per_page"]), 100))
+            except Exception:
+                params["per_page"] = 100
+
+        resp = requests.get(url, params=params, headers=headers, timeout=90)
+
+        # ✅ 디버그: 400/403 등일 때 이유 찍기
+        if resp.status_code >= 400:
+            print("[BDL] ERROR", resp.status_code, "url=", resp.url)
+            try:
+                print("[BDL] body:", resp.text[:500])
+            except Exception:
+                pass
+
         resp.raise_for_status()
         return resp.json()
+
+
+
 
     def _build_team_map(self) -> Dict[str, str]:
         """
@@ -90,7 +111,7 @@ class OddsAPIClient:
         if self._team_map_norm_to_abbr is not None:
             return self._team_map_norm_to_abbr
 
-        data = self._get_bdl("/teams", params={"per_page": 300})
+        data = self._get_bdl("/teams", params={"per_page": 100})
         teams = data.get("data", []) or []
 
         m: Dict[str, str] = {}
@@ -215,7 +236,7 @@ class OddsAPIClient:
         """
         all_rows = []
         for d in sorted(set(dates)):
-            data = self._get_bdl("/games", params={"dates[]": d, "per_page": 300})
+            data = self._get_bdl("/games", params={"dates[]": d, "per_page": 100})
             games = data.get("data", []) or []
 
             for g in games:
