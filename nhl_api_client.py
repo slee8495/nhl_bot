@@ -172,16 +172,20 @@ class NHLDataClient:
         """
         all_rows: List[Dict[str, Any]] = []
 
+        # ✅ per_page 캡
+        try:
+            per_page = int(per_page)
+        except Exception:
+            per_page = 100
+        per_page = max(1, min(per_page, 100))
+
         for season in seasons:
             cursor = None
-            page = 1
 
             while True:
                 params = {"seasons[]": season, "per_page": per_page}
                 if cursor is not None:
                     params["cursor"] = cursor
-                else:
-                    params["page"] = page
 
                 data = self._get("/games", params=params)
                 games = data.get("data", []) or []
@@ -192,18 +196,13 @@ class NHLDataClient:
                     all_rows.append(self._normalize_game_row(g))
 
                 meta = data.get("meta", {}) or {}
-                next_cursor = meta.get("next_cursor", None)
+                next_cursor = meta.get("next_cursor")
 
-                if next_cursor is not None:
-                    if next_cursor == cursor:
-                        break
-                    cursor = next_cursor
-                    continue
-
-                total_pages = meta.get("total_pages", page)
-                if page >= total_pages:
+                if not next_cursor or next_cursor == cursor:
                     break
-                page += 1
+
+                cursor = next_cursor
+
 
         if not all_rows:
             return pd.DataFrame()
@@ -223,15 +222,20 @@ class NHLDataClient:
             d_str = str(d)
 
         rows: List[Dict[str, Any]] = []
+
+        # ✅ per_page 안전 캡 (API 스펙/서버 검증 강화 대응)
+        try:
+            per_page = int(per_page)
+        except Exception:
+            per_page = 100
+        per_page = max(1, min(per_page, 100))
+
         cursor = None
-        page = 1
 
         while True:
             params = {"dates[]": d_str, "per_page": per_page}
             if cursor is not None:
                 params["cursor"] = cursor
-            else:
-                params["page"] = page
 
             data = self._get("/games", params=params)
             games = data.get("data", []) or []
@@ -242,20 +246,16 @@ class NHLDataClient:
                 rows.append(self._normalize_game_row(g))
 
             meta = data.get("meta", {}) or {}
-            next_cursor = meta.get("next_cursor", None)
+            next_cursor = meta.get("next_cursor")
 
-            if next_cursor is not None:
-                if next_cursor == cursor:
-                    break
-                cursor = next_cursor
-                continue
-
-            total_pages = meta.get("total_pages", page)
-            if page >= total_pages:
+            # ✅ cursor가 없으면 끝 (page 기반 fallback 삭제)
+            if not next_cursor or next_cursor == cursor:
                 break
-            page += 1
+
+            cursor = next_cursor
 
         return rows
+
 
     def fetch_games_by_date_df(
         self,
