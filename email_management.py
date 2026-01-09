@@ -349,6 +349,43 @@ def send_nhl_daily_report(
         print("[EMAIL DEBUG] eligible count:", int(top_games["eligible_order"].sum()), " / ", len(top_games))
 
         top_games["is_no_bet"] = ~top_games["eligible_order"].astype(bool)
+        
+        # =========================================================
+        # ✅ NEW: 경기(game_id)별로 초록이 하나도 없으면,
+        #    model_p가 더 높은 쪽 1줄은 파란색으로 표시해서
+        #    "둘 다 빨강"을 방지한다.
+        # =========================================================
+        top_games["model_fav_blue"] = False
+
+        if "game_id" in top_games.columns and len(top_games) > 0:
+            def _mark_blue(g: pd.DataFrame) -> pd.DataFrame:
+                g = g.copy()
+
+                # 이미 초록(eligible)이 한 줄이라도 있으면 파란색 필요 없음
+                if g["eligible_order"].astype(bool).any():
+                    return g
+
+                # 둘 다 non-eligible이면 model_p가 더 큰 쪽을 파란색으로
+                mp = pd.to_numeric(g["model_p"], errors="coerce")
+                if mp.notna().any():
+                    idx = mp.idxmax()
+                else:
+                    # model_p가 둘 다 NaN이면 p_xgb로 fallback
+                    xgb = pd.to_numeric(g.get("p_xgb"), errors="coerce")
+                    idx = xgb.idxmax() if xgb.notna().any() else g.index[0]
+
+                g.loc[idx, "model_fav_blue"] = True
+
+                # 파란색 줄은 "no bet"이긴 하지만 빨강으로 칠하지 않게 하기 위해
+                # is_no_bet 플래그를 False로 내려준다 (스타일 판단용)
+                g.loc[idx, "is_no_bet"] = False
+
+                return g
+
+            top_games = top_games.groupby("game_id", group_keys=False).apply(_mark_blue)
+
+
+
 
     # ==============================
     # 1) Plain text body
@@ -506,15 +543,21 @@ def send_nhl_daily_report(
             eligible = bool(row.get("eligible_order", False))
             is_no_bet = bool(row.get("is_no_bet", False))
             is_market_flip = (signal.strip().upper() == "MARKET FLIP")
+            is_model_fav_blue = bool(row.get("model_fav_blue", False))
 
             if eligible:
-                style = "color:#0a7a0a; font-weight:bold;"
-            elif is_no_bet:
-                style = "color:#cc0000;"
+                style = "color:#0a7a0a; font-weight:bold;"          # 초록 유지
             elif is_market_flip:
-                style = "color:#0066cc; font-weight:bold;"
+                style = "color:#0066cc; font-weight:bold;"          # 기존 파랑(마켓플립)
+            elif is_model_fav_blue:
+                style = "color:#0066cc; font-weight:bold;"          # ✅ NEW: 모델 우세팀 파랑
+            elif is_no_bet:
+                style = "color:#cc0000;"                            # 빨강은 "진짜 no bet"만
             else:
                 style = ""
+
+
+
 
             order_tag = "YES" if eligible else "no"
 
