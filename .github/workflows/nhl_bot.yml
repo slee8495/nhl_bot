@@ -45,7 +45,7 @@ on:
     # - cron: "0 0 * * *"
 
     # 5 PM  (PST) = 01:00 UTC (next day)
-    - cron: "0 1 * * *"
+    # - cron: "0 1 * * *"
 
     # 6 PM  (PST) = 02:00 UTC (next day)
     # - cron: "0 2 * * *"
