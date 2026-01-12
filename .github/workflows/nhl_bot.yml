@@ -24,7 +24,7 @@ on:
     # - cron: "0 17 * * *"
 
     # 10 AM (PST) = 18:00 UTC
-    - cron: "0 18 * * *"
+    # - cron: "0 18 * * *"
 
     # 11 AM (PST) = 19:00 UTC
     # - cron: "0 19 * * *"
@@ -39,7 +39,7 @@ on:
     - cron: "0 22 * * *"
 
     # 3 PM  (PST) = 23:00 UTC
-    #- cron: "0 23 * * *"
+    - cron: "0 23 * * *"
 
     # 4 PM  (PST) = 00:00 UTC (next day)
     # - cron: "0 0 * * *"
