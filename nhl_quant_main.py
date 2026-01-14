@@ -365,6 +365,8 @@ def main():
 
     if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
         raise RuntimeError("[NHL MAIN] scored_games missing home_team/away_team after schedule meta join.")
+    
+    
 
 
 
