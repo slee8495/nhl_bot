@@ -308,6 +308,24 @@ def main():
 
     if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
         raise RuntimeError("[NHL NEXT] scored_games missing home_team/away_team after schedule meta join.")
+    
+    # ✅ downstream merge 안정화: 날짜 고정
+    scored_games["date"] = slate_date_pt
+
+    # ✅ (5.1) Lineup/Injury features + prob adjust
+    if HAS_LINEUP:
+        try:
+            scored_games = attach_lineup_features(scored_games, today=slate_date_pt)
+            scored_games = adjust_prob_with_lineup(scored_games)
+
+            # ✅ per-game lineup summary to GitHub Actions logs
+            _log_lineup_summary(scored_games)
+
+        except Exception as e:
+            print(f"[NHL NEXT] lineup adjust skipped: {e}")
+
+    # ✅ lineup adjust 후에도 날짜 다시 고정
+    scored_games["date"] = slate_date_pt
 
 
 
