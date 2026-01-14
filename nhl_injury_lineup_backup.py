@@ -1,5 +1,3 @@
-
-
 # nhl_injury_lineup.py
 from __future__ import annotations
 
@@ -968,13 +966,3 @@ def adjust_prob_with_lineup(
     df["z_lineup_total"] = z_total_list
 
     return df
-
-
-
-====
-
-그럼 현재 이 코드에서 조금만 개조하면, 
-예를 들어, 골리 이름, 선발들 리스트 보이게 반영하면. 
-
-전날 돌린거 로그, 다음날 돌린거 로그, 비교해 봤을 때. 아 이거때문이구나 확실하다. 라고 판단할 수 있지 않을까? 
-
