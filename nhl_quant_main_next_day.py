@@ -152,8 +152,13 @@ def _log_lineup_summary(df: pd.DataFrame, top_n: int = 50):
         so_home = r.get("missing_star_names_home")
         so_away = r.get("missing_star_names_away")
 
-        goh = int(r.get("goalie_out_flag_home", 0) or 0)
-        goa = int(r.get("goalie_out_flag_away", 0) or 0)
+        def _safe_int_log(x, default=0):
+            v = pd.to_numeric(x, errors="coerce")
+            return int(v) if pd.notna(v) else int(default)
+
+        goh = _safe_int_log(r.get("goalie_out_flag_home", 0), 0)
+        goa = _safe_int_log(r.get("goalie_out_flag_away", 0), 0)
+
 
         print(
             f"[GAME {gid}] {away}@{home} | p={p:.3f} adj={pa:.3f} | "
