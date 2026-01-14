@@ -1,5 +1,3 @@
-
-
 # nhl_quant_main_next_day.py
 
 from __future__ import annotations
@@ -308,10 +306,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-====
-
-이것도 고쳐줘. nhl_quant_main.py 랑 똑같이 고치면 되? 
-새 함수 추가하고, if has_lineup 이거 고치고? 
-

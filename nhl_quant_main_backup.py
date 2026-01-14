@@ -141,50 +141,6 @@ def _filter_odds_by_pt_slate_date(odds_df_all: pd.DataFrame, slate_pt_date: date
     out.drop(columns=["_dt_utc", "_pt_date"], inplace=True, errors="ignore")
     return out
 
-def _log_lineup_summary(df: pd.DataFrame, top_n: int = 50):
-    if df is None or df.empty:
-        return
-
-    need = [
-        "game_id","home_team_abbr","away_team_abbr",
-        "p_home_win","p_home_win_adj",
-        "z_lineup_depth","z_star_penalty","z_goalie_penalty","z_lineup_total",
-        "goalie_proxy_name_home","goalie_proxy_name_away",
-        "missing_star_names_home","missing_star_names_away",
-        "out_names_preview_home","out_names_preview_away",
-        "goalie_out_flag_home","goalie_out_flag_away",
-    ]
-    cols = [c for c in need if c in df.columns]
-
-    print("[NHL LINEUP SUMMARY] per-game snapshot")
-    for _, r in df[cols].head(top_n).iterrows():
-        gid = int(r.get("game_id")) if pd.notna(r.get("game_id")) else -1
-        away = r.get("away_team_abbr") or r.get("away_team") or "AWAY"
-        home = r.get("home_team_abbr") or r.get("home_team") or "HOME"
-
-        p = float(r.get("p_home_win")) if pd.notna(r.get("p_home_win")) else float("nan")
-        pa = float(r.get("p_home_win_adj")) if pd.notna(r.get("p_home_win_adj")) else p
-
-        z_d = float(r.get("z_lineup_depth", 0.0) or 0.0)
-        z_s = float(r.get("z_star_penalty", 0.0) or 0.0)
-        z_g = float(r.get("z_goalie_penalty", 0.0) or 0.0)
-        z_t = float(r.get("z_lineup_total", 0.0) or 0.0)
-
-        g_home = r.get("goalie_proxy_name_home")
-        g_away = r.get("goalie_proxy_name_away")
-
-        so_home = r.get("missing_star_names_home")
-        so_away = r.get("missing_star_names_away")
-
-        goh = int(r.get("goalie_out_flag_home", 0) or 0)
-        goa = int(r.get("goalie_out_flag_away", 0) or 0)
-
-        print(
-            f"[GAME {gid}] {away}@{home} | p={p:.3f} adj={pa:.3f} | "
-            f"z(d/s/g/t)=({z_d:+.3f}/{z_s:+.3f}/{z_g:+.3f}/{z_t:+.3f}) | "
-            f"G(proxy) A={g_away} H={g_home} (out A/H={goa}/{goh}) | "
-            f"StarOut A={so_away} H={so_home}"
-        )
 
 
 def main():
@@ -378,10 +334,6 @@ def main():
         try:
             scored_games = attach_lineup_features(scored_games, today=today)
             scored_games = adjust_prob_with_lineup(scored_games)
-
-            # ✅ NEW: per-game lineup summary to GitHub Actions logs
-            _log_lineup_summary(scored_games)
-
         except Exception as e:
             print(f"[NHL MAIN] lineup adjust skipped: {e}")
 

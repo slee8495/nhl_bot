@@ -746,16 +746,31 @@ def build_lineup_table_for_today(
             goalie_out_flag = 1
             goalie_missing_score = float(np.clip(goalie_score, 0.0, float(cfg.goalie_score_clip)))
 
+        # ✅ ADD: 스타 OUT 이름 리스트 (원본 이름 유지)
+        missing_star_names = []
+        for pn in star_names:
+            if _norm(pn) in out_names:
+                missing_star_names.append(str(pn))
+
+        # ✅ ADD: OUT 리스트 preview (너무 길면 로그 폭발)
+        out_names_preview = sorted(list(out_names))[:15]  # norm 형태
+
         out_rows.append(
             {
                 "team_id": int(tid),
                 "team_name": team_name,
                 "season": int(season),
+
                 "lineup_depth_score": depth_score,
                 "lineup_missing_star_count": int(missing_star_count),
                 "lineup_missing_star_score": float(missing_star_score),
                 "goalie_out_flag": int(goalie_out_flag),
                 "goalie_missing_score": float(goalie_missing_score),
+
+                # ✅ NEW FIELDS (로그/스냅샷용)
+                "goalie_proxy_name": goalie_name,               # TOI max goalie (proxy)
+                "missing_star_names": missing_star_names,        # 원본 이름
+                "out_names_preview": out_names_preview,          # norm 이름 preview
             }
         )
 
@@ -836,6 +851,11 @@ def attach_lineup_features(
                 "lineup_missing_star_score_home",
                 "goalie_out_flag_home",
                 "goalie_missing_score_home",
+
+                # ✅ NEW
+                "goalie_proxy_name_home",
+                "missing_star_names_home",
+                "out_names_preview_home",
             ]
         ],
         how="left",
@@ -855,6 +875,12 @@ def attach_lineup_features(
                 "lineup_missing_star_score_away",
                 "goalie_out_flag_away",
                 "goalie_missing_score_away",
+
+                # ✅ NEW
+                "goalie_proxy_name_away",
+                "missing_star_names_away",
+                "out_names_preview_away",
+
             ]
         ],
         how="left",
