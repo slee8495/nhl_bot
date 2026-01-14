@@ -162,20 +162,7 @@ def _log_lineup_summary(df: pd.DataFrame, top_n: int = 50):
             f"StarOut A={so_away} H={so_home}"
         )
 
-        # ✅ (5.1) Lineup/Injury features + prob adjust (NEXT_DAY도 동일하게)
-        if HAS_LINEUP:
-            try:
-                scored_games = attach_lineup_features(scored_games, today=slate_date_pt)
-                scored_games = adjust_prob_with_lineup(scored_games)
-
-                # ✅ NEW: per-game lineup summary to GitHub Actions logs
-                _log_lineup_summary(scored_games)
-
-            except Exception as e:
-                print(f"[NHL NEXT] lineup adjust skipped: {e}")
-
-        # ✅ lineup adjust 후에도 날짜 다시 고정 (안전)
-        scored_games["date"] = slate_date_pt
+        
 
 def main():
     tz_pt = ZoneInfo("America/Los_Angeles")
