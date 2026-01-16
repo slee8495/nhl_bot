@@ -268,13 +268,40 @@ def main():
         tomorrow_games,
         slate_date_pt,
     )
+
     if today_df is None or today_df.empty:
         print("[NHL NEXT] No valid feature rows. Abort.")
         return
+    
+    # =========================================================
+    # DEBUG: XGB input feature sanity check (NEXT)
+    # =========================================================
+    print("[DEBUG][NEXT][XGB INPUT] n_features =", len(feature_cols))
+
+    lineup_feats = [c for c in feature_cols if c.startswith("lineup_") or c.startswith("diff_lineup_")]
+    print("[DEBUG][NEXT][XGB INPUT] lineup features in feature_cols:", lineup_feats)
+
+    lineup_cols_df = [c for c in today_df.columns if c.startswith("lineup_") or c.startswith("diff_lineup_")]
+    print("[DEBUG][NEXT][XGB INPUT] lineup columns in today_df:", lineup_cols_df)
+
+    print("[DEBUG][NEXT][XGB INPUT] today_df shape:", today_df.shape)
+
 
     # (5) Predict
     win_model = NHLQuantModel.load_from_disk()
     scored_games = win_model.predict_proba(today_df)
+    
+    # =========================================================
+    # DEBUG: prediction output columns (NEXT)
+    # =========================================================
+    prob_cols = [c for c in ["p_home_win", "p_home_win_adj", "p_home_win_xgb", "p_xgb", "model_p"] if c in scored_games.columns]
+    print("[DEBUG][NEXT][PRED] prob cols present:", prob_cols)
+
+    if "p_home_win" in scored_games.columns:
+        s = pd.to_numeric(scored_games["p_home_win"], errors="coerce")
+        print("[DEBUG][NEXT][PRED] p_home_win min/mean/max:", float(s.min()), float(s.mean()), float(s.max()))
+
+    
     scored_games["date"] = slate_date_pt
 
     need = ["game_id", "season", "home_team_id", "away_team_id", "home_team", "away_team", "home_team_abbr", "away_team_abbr"]

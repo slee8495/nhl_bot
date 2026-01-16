@@ -329,9 +329,27 @@ def main():
         today_games,
         today,
     )
+    
     if today_df is None or today_df.empty:
         print("[NHL MAIN] No valid feature rows for today. Abort.")
         return
+    
+    # =========================================================
+    # DEBUG: XGB input feature sanity check
+    # =========================================================
+    print("[DEBUG][XGB INPUT] n_features =", len(feature_cols))
+
+    lineup_feats = [c for c in feature_cols if c.startswith("lineup_") or c.startswith("diff_lineup_")]
+    print("[DEBUG][XGB INPUT] lineup features in feature_cols:", lineup_feats)
+
+    lineup_cols_df = [c for c in today_df.columns if c.startswith("lineup_") or c.startswith("diff_lineup_")]
+    print("[DEBUG][XGB INPUT] lineup columns in today_df:", lineup_cols_df)
+
+    # optional: 실제 모델에 들어가는 X 행 shape
+    print("[DEBUG][XGB INPUT] today_df shape:", today_df.shape)
+
+
+
 
 
 
