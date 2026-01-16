@@ -32,20 +32,6 @@ import pandas as pd
 
 from nhl_team_abbr import to_abbr
 
-from nhl_injury_lineup import (
-    NHLLineupClient,
-    _normalize_tricode,
-    build_lineup_power_table_for_season,
-)
-
-
-# =========================
-# Leak-safe switches
-# =========================
-USE_LINEUP_POWER_IN_TRAIN = False   # ✅ 누수 방지: 학습에선 절대 안 씀
-USE_LINEUP_POWER_IN_TODAY = True    # ✅ 오늘 inference에선 써도 됨
-
-
 
 # =========================================================
 # Elo (optional but useful and cheap)
@@ -104,51 +90,6 @@ def _add_elo_to_games(
     df["elo_away"] = elo_away_list
     return df
 
-
-
-def _attach_bdl_team_ids_from_abbr(
-    df: pd.DataFrame,
-    home_abbr_col: str,
-    away_abbr_col: str,
-) -> pd.DataFrame:
-    """
-    df의 home/away team abbr -> BDL team_id 매핑을 붙인다.
-    결과 컬럼:
-      - home_team_id_bdl
-      - away_team_id_bdl
-    """
-    out = df.copy()
-    if (home_abbr_col not in out.columns) or (away_abbr_col not in out.columns):
-        return out
-
-    client = NHLLineupClient()
-    teams = client.fetch_teams()
-    if teams is None or teams.empty:
-        return out
-
-    teams = teams.copy()
-    teams["tricode_norm"] = teams["tricode"].apply(_normalize_tricode)
-    teams["team_id_bdl"] = pd.to_numeric(teams["team_id"], errors="coerce").astype("Int64")
-
-    out["_home_tri"] = out[home_abbr_col].apply(_normalize_tricode)
-    out["_away_tri"] = out[away_abbr_col].apply(_normalize_tricode)
-
-    out = out.merge(
-        teams[["tricode_norm", "team_id_bdl"]].rename(
-            columns={"tricode_norm": "_home_tri", "team_id_bdl": "home_team_id_bdl"}
-        ),
-        on="_home_tri",
-        how="left",
-    )
-    out = out.merge(
-        teams[["tricode_norm", "team_id_bdl"]].rename(
-            columns={"tricode_norm": "_away_tri", "team_id_bdl": "away_team_id_bdl"}
-        ),
-        on="_away_tri",
-        how="left",
-    )
-    out.drop(columns=["_home_tri", "_away_tri"], inplace=True, errors="ignore")
-    return out
 
 # =========================================================
 # Team panel: team × game rows
@@ -287,76 +228,6 @@ def build_training_dataset(raw_games: pd.DataFrame) -> Tuple[pd.DataFrame, list[
 
     # Elo
     rg = _add_elo_to_games(rg)
-    
-    # =========================================================
-    # ✅ Lineup Power (BASE) for XGB training
-    #    ⚠️ LEAK-SAFE: 학습에서는 season 누적 스탯 기반 power를 쓰면 누수 가능성이 큼.
-    #    그래서 기본은 OFF. (today inference에서는 사용 가능)
-    # =========================================================
-    if USE_LINEUP_POWER_IN_TRAIN and ("home_team_abbr" in rg.columns) and ("away_team_abbr" in rg.columns):
-        try:
-            rg = _attach_bdl_team_ids_from_abbr(rg, "home_team_abbr", "away_team_abbr")
-
-            power_tables = []
-            for s in sorted(pd.to_numeric(rg["season"], errors="coerce").dropna().astype(int).unique().tolist()):
-                sub = rg[pd.to_numeric(rg["season"], errors="coerce").fillna(s).astype(int) == s]
-                team_ids = pd.unique(pd.concat([sub["home_team_id_bdl"], sub["away_team_id_bdl"]]))
-                team_ids = pd.to_numeric(team_ids, errors="coerce")
-                team_ids = team_ids[~pd.isna(team_ids)].astype(int).tolist()
-                if not team_ids:
-                    continue
-
-                ptab = build_lineup_power_table_for_season(season=s, team_ids=team_ids)
-                if ptab is not None and not ptab.empty:
-                    power_tables.append(ptab)
-
-            lineup_power = pd.concat(power_tables, ignore_index=True) if power_tables else pd.DataFrame()
-
-            if lineup_power is not None and not lineup_power.empty:
-                lineup_power["team_id"] = pd.to_numeric(lineup_power["team_id"], errors="coerce").astype("Int64")
-
-                home_pow = lineup_power.add_suffix("_home").rename(columns={"team_id_home": "home_team_id_bdl"})
-                rg = rg.merge(
-                    home_pow[
-                        [
-                            "home_team_id_bdl",
-                            "lineup_star_power_base_home",
-                            "lineup_goalie_power_base_home",
-                            "lineup_depth_base_home",
-                        ]
-                    ],
-                    on="home_team_id_bdl",
-                    how="left",
-                )
-
-                away_pow = lineup_power.add_suffix("_away").rename(columns={"team_id_away": "away_team_id_bdl"})
-                rg = rg.merge(
-                    away_pow[
-                        [
-                            "away_team_id_bdl",
-                            "lineup_star_power_base_away",
-                            "lineup_goalie_power_base_away",
-                            "lineup_depth_base_away",
-                        ]
-                    ],
-                    on="away_team_id_bdl",
-                    how="left",
-                )
-
-                def _sd(a, b, outc):
-                    if (a in rg.columns) and (b in rg.columns):
-                        rg[outc] = pd.to_numeric(rg[a], errors="coerce") - pd.to_numeric(rg[b], errors="coerce")
-
-                _sd("lineup_star_power_base_home", "lineup_star_power_base_away", "diff_lineup_star_power_base")
-                _sd("lineup_goalie_power_base_home", "lineup_goalie_power_base_away", "diff_lineup_goalie_power_base")
-                _sd("lineup_depth_base_home", "lineup_depth_base_away", "diff_lineup_depth_base")
-
-        except Exception as e:
-            print(f"[NHL FE] lineup power training merge skipped: {e}")
-
-
-
-
 
     # team panel
     team_panel = _build_team_level_panel(rg)
@@ -494,30 +365,8 @@ def build_training_dataset(raw_games: pd.DataFrame) -> Tuple[pd.DataFrame, list[
         "diff_elo_like",
         "diff_rolling_win_rate_5",
         "diff_rolling_goal_diff_5",
-        
-        # lineup power (BASE)
-        "lineup_star_power_base_home",
-        "lineup_star_power_base_away",
-        "lineup_goalie_power_base_home",
-        "lineup_goalie_power_base_away",
-        "lineup_depth_base_home",
-        "lineup_depth_base_away",
-        "diff_lineup_star_power_base",
-        "diff_lineup_goalie_power_base",
-        "diff_lineup_depth_base",
-
-
     ]
     feature_cols = [c for c in feature_cols if c in df.columns]
-    
-    # ✅ 누수 방지: 학습에서는 lineup power 컬럼 제거
-    if not USE_LINEUP_POWER_IN_TRAIN:
-        feature_cols = [
-            c for c in feature_cols
-            if not c.startswith("lineup_") and not c.startswith("diff_lineup_")
-        ]
-
-
 
     # final train df
     base_cols = [
@@ -706,13 +555,9 @@ def build_today_dataset(
     _safe_diff_today("elo_like_home", "elo_like_away", "diff_elo_like")
     _safe_diff_today("rolling_win_rate_5_home", "rolling_win_rate_5_away", "diff_rolling_win_rate_5")
     _safe_diff_today("rolling_goal_diff_5_home", "rolling_goal_diff_5_away", "diff_rolling_goal_diff_5")
-    
-    
 
-    # =========================================
-    # feature 후보 원본 (merge 완료 후 최종 선택용)
-    # =========================================
-    _feature_cols_master = [
+    # feature cols (intersection with df)
+    feature_cols: list[str] = [
         "rolling_win_rate_10_home",
         "rolling_win_rate_10_away",
         "rolling_goal_diff_10_home",
@@ -754,106 +599,19 @@ def build_today_dataset(
         "diff_elo_like",
         "diff_rolling_win_rate_5",
         "diff_rolling_goal_diff_5",
-
-        # lineup power (today에서만 허용)
-        "lineup_star_power_base_home",
-        "lineup_star_power_base_away",
-        "lineup_goalie_power_base_home",
-        "lineup_goalie_power_base_away",
-        "lineup_depth_base_home",
-        "lineup_depth_base_away",
-        "diff_lineup_star_power_base",
-        "diff_lineup_goalie_power_base",
-        "diff_lineup_depth_base",
     ]
+    feature_cols = [c for c in feature_cols if c in df.columns]
 
-
-
-
-
-    
-    
-    # =========================================================
-    # ✅ Lineup Power (BASE) for XGB inference (df stage)
-    # =========================================================
-    try:
-        if ("home_team_abbr_std" in df.columns) and ("away_team_abbr_std" in df.columns):
-            tmp = df.copy()
-            tmp = _attach_bdl_team_ids_from_abbr(tmp, "home_team_abbr_std", "away_team_abbr_std")
-
-            team_ids = pd.unique(pd.concat([tmp["home_team_id_bdl"], tmp["away_team_id_bdl"]]))
-            team_ids = pd.to_numeric(team_ids, errors="coerce")
-            team_ids = team_ids[~pd.isna(team_ids)].astype(int).tolist()
-
-            if team_ids:
-                ptab = build_lineup_power_table_for_season(season=int(tmp["season"].max()), team_ids=team_ids)
-                if ptab is not None and not ptab.empty:
-                    ptab["team_id"] = pd.to_numeric(ptab["team_id"], errors="coerce").astype("Int64")
-
-                    home_pow = ptab.add_suffix("_home").rename(columns={"team_id_home": "home_team_id_bdl"})
-                    tmp = tmp.merge(
-                        home_pow[
-                            [
-                                "home_team_id_bdl",
-                                "lineup_star_power_base_home",
-                                "lineup_goalie_power_base_home",
-                                "lineup_depth_base_home",
-                            ]
-                        ],
-                        on="home_team_id_bdl",
-                        how="left",
-                    )
-
-                    away_pow = ptab.add_suffix("_away").rename(columns={"team_id_away": "away_team_id_bdl"})
-                    tmp = tmp.merge(
-                        away_pow[
-                            [
-                                "away_team_id_bdl",
-                                "lineup_star_power_base_away",
-                                "lineup_goalie_power_base_away",
-                                "lineup_depth_base_away",
-                            ]
-                        ],
-                        on="away_team_id_bdl",
-                        how="left",
-                    )
-
-                    def _sd(a, b, outc):
-                        if (a in tmp.columns) and (b in tmp.columns):
-                            tmp[outc] = pd.to_numeric(tmp[a], errors="coerce") - pd.to_numeric(tmp[b], errors="coerce")
-
-                    _sd("lineup_star_power_base_home", "lineup_star_power_base_away", "diff_lineup_star_power_base")
-                    _sd("lineup_goalie_power_base_home", "lineup_goalie_power_base_away", "diff_lineup_goalie_power_base")
-                    _sd("lineup_depth_base_home", "lineup_depth_base_away", "diff_lineup_depth_base")
-
-                    df = tmp
-    except Exception as e:
-        print(f"[NHL FE] lineup power today merge skipped: {e}")
-
-
-  
-    
-
-    # ✅ today lineup power ON/OFF
-    if not USE_LINEUP_POWER_IN_TODAY:
-        _feature_cols_master = [
-            c for c in _feature_cols_master
-            if not c.startswith("lineup_") and not c.startswith("diff_lineup_")
-        ]
-
-    # ✅ merge 다 끝난 "최종 df" 기준으로 feature_cols 재확정
-    feature_cols = [c for c in _feature_cols_master if c in df.columns]
-
-    # ✅ base_cols도 "최종 df" 기준으로 재확정 (KeyError 방지)
+    # final today df
     base_cols = ["game_id", "date", "season", "home_team", "away_team"]
+
+    # keep abbr std to help odds merge later
     for c in ["home_team_abbr_std", "away_team_abbr_std"]:
         if c in df.columns:
             base_cols.append(c)
 
-
-
     today_df = df[base_cols + feature_cols].copy()
-    
+
     # numeric cast + impute
     for c in feature_cols:
         today_df[c] = pd.to_numeric(today_df[c], errors="coerce")
