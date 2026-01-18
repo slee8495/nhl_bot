@@ -265,32 +265,49 @@ def send_nhl_daily_report(
         req_edge_flip = np.where(is_plus200, EDGE_MIN_FLIP_PLUS200, EDGE_MIN_FLIP)
         req_edge = np.where(flip, req_edge_flip, req_edge_normal)
 
-        EDGE_FLOOR = -3.0  # ✅ -3%까지 허용 (원하면 -2.0)
+        EDGE_FLOOR = -3.0
         elig = (edgep >= req_edge) & base_prob_ok
 
-        # ✅ 추가: strong-prob인데 edge가 살짝 음수면 허용
+        # soft yes
         soft_yes = base_prob_ok & (edgep >= EDGE_FLOOR) & (odds.abs() <= AUTO_YES_MAX_ABS_ODDS)
-
         if AUTO_YES_ONLY_NON_FLIP:
             soft_yes = soft_yes & (~flip)
-
         elig = elig | soft_yes
 
         if UNDERDOG_ONLY:
             elig = elig & (odds > 0)
 
+        # 기존 auto_yes
         auto_yes = (
             (xgb >= 0.55) &
             (mp >= 0.55) &
             (odds.abs() <= AUTO_YES_MAX_ABS_ODDS) &
             (edgep >= -1.0)
         )
-
         if AUTO_YES_ONLY_NON_FLIP:
             auto_yes = auto_yes & (~flip)
 
+        # =========================
+        # EV 계산 (stake=$100 기준)
+        # =========================
+        EV_MIN_USD = 2.0  # ✅ 하드컷 기준
+        if "ev_amount" in df.columns:
+            ev_amount = _to_num(df.get("ev_amount"))
+        else:
+            ev_amount = df.apply(
+                lambda r: _calc_ev_amount(r.get("american_odds", np.nan), r.get("model_p", np.nan), stake=100.0),
+                axis=1,
+            )
+            ev_amount = pd.to_numeric(ev_amount, errors="coerce")
+
+        # 최종 eligible: edge/soft/auto 중 하나라도 YES면 통과 가능
         elig = elig.astype(bool) | auto_yes.astype(bool)
+
+        # ✅ HARD GATE: EV < 2면 어떤 경우든 무조건 컷
+        elig = elig & (ev_amount >= EV_MIN_USD)
+
         return elig
+
 
     # ==============================
     # 0) Top table: best book per (game_id, side)
