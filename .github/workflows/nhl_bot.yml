@@ -131,8 +131,8 @@ jobs:
             exit 0
           fi
 
-          # Scheduled run: 9:00 PM PT (PST) = 05:00 UTC => "0 5 * * *"
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "0 5 * * *" ]; then
+          # Scheduled run: 8:00 PM PT (PST) = 04:00 UTC => "0 4 * * *"
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "0 4 * * *" ]; then
             echo "use_nextday=true" >> $GITHUB_OUTPUT
           else
             echo "use_nextday=false" >> $GITHUB_OUTPUT
