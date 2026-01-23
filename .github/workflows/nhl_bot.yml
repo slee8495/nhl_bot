@@ -8,7 +8,7 @@ on:
     # 09:00 PT (PST, UTC-8) = 09:00 UTC
     - cron: "0 5 * * *"
     # =========================
-    
+     
     # ✅ Annual retrain (Aug 1)
     # -------------------------
     # Aug is typically PDT (UTC-7): 06:00 PT = 13:00 UTC
