@@ -1,3 +1,36 @@
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+
+--
+
+      - name: Debug schedule identity
+        run: |
+          echo "================ DEBUG ================="
+          echo "workflow_ref = ${{ github.workflow_ref }}"
+          echo "workflow     = ${{ github.workflow }}"
+          echo "sha          = ${{ github.sha }}"
+          echo "event_name   = ${{ github.event_name }}"
+          echo "schedule     = ${{ github.event.schedule }}"
+          echo "run_id       = ${{ github.run_id }}"
+          echo "run_number   = ${{ github.run_number }}"
+          echo "----------------------------------------"
+          echo "UTC time:"
+          date -u
+          echo "LA time:"
+          TZ=America/Los_Angeles date
+          echo "========================================"
+
+
+
+--
+
+
+
 name: NHL Quant-Bot
 
 on:
