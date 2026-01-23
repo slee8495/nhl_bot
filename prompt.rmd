@@ -1,10 +1,9 @@
 
 
-방금 .github\workflows 폴더 통채로 지우고 다시 Actions 에서 new workflow 로 해봤는데도 그래도 안된다.
-새로운 푸쉬가 안먹어. 아무리 해도. 
+예전에 예약되고 그런거 없어. 
+무슨일인지 somehow, 새로 푸쉬하는 yml 코드가 레포에서 안먹어. 
+자꾸 몇일전에 푸쉬했던 yml 코드로만 먹어. 
+그리고 나는 yml 파일은 한개밖에 없어. 
 
-근데 내가 .github\workflows 폴더 지울 때 보니까, 이거 지워도 Actions 에 모든 로그는 남던데. 이거까지 swap 하고 해야 하나? 
-
-내가 .github\workflows 지운것만으로도 충분하지 않아? 
-이거땜에 repo 자체를 아예 새로 팔 수도 없고. 
+그럼, workflow 를 disable 한번 하고, 다시 able 시키자? 
 
