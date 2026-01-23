@@ -26,6 +26,9 @@ on:
     # 10 AM (PST) = 18:00 UTC
     # - cron: "0 18 * * *"
 
+    # TEST RUN 10:40
+    - cron: "40 18 * * *"
+
     # 11 AM (PST) = 19:00 UTC
     - cron: "0 19 * * *"
 
