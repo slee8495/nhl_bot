@@ -7,3 +7,6 @@
 
 그럼, workflow 를 disable 한번 하고, 다시 able 시키자? 
 
+nhl_bot.yml 이라는 파일이름을 바꿔보면 어때? 
+
+nhl_quant_bot.yml 뭐 이렇게? 
