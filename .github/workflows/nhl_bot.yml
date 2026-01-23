@@ -6,7 +6,7 @@ on:
     # ✅ Daily run @ 9:00 PM PT (PST)
     # -------------------------
     # 09:00 PT (PST, UTC-8) = 09:00 UTC
-    # - cron: "0 5 * * *"
+    - cron: "0 5 * * *"
     # =========================
      
     # ✅ Annual retrain (Aug 1)
