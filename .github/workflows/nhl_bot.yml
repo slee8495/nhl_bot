@@ -24,10 +24,10 @@ on:
     - cron: "0 17 * * *"
 
     # 10 AM (PST) = 18:00 UTC
-    - cron: "0 18 * * *"
+    # - cron: "0 18 * * *"
 
     # 11 AM (PST) = 19:00 UTC
-    # - cron: "0 19 * * *"
+    - cron: "0 19 * * *"
 
     # 12 PM (PST) = 20:00 UTC
     # - cron: "0 20 * * *"
@@ -116,7 +116,6 @@ jobs:
           fi
 
       # ✅ Detect next-day script usage:
-      # - scheduled 9:00 PM PT (0 5 * * *) => next_day
       # - manual run: depends on inputs.run_mode
       - name: Detect next-day run (schedule or manual)
         id: nextday_flag
