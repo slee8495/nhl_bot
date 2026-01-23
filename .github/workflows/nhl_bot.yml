@@ -1,4 +1,4 @@
-name: NHL Quant Bot
+name: NHL Quant-Bot
 
 on:
   schedule:
