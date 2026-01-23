@@ -182,7 +182,7 @@ jobs:
           git push
 
       # ✅ Run bot (daily + retrain day)
-      - name: Run NHL Quant Bot
+      - name: Run NHL Quant-Bot
         env:
           EMAIL_HOST: ${{ secrets.EMAIL_HOST }}
           EMAIL_PORT: ${{ secrets.EMAIL_PORT }}
