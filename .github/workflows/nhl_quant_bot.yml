@@ -1,7 +1,7 @@
 name: NHL Quant-Bot
 
 on:
-  schedule:
+  # schedule:
     # =========================  
     # ✅ Daily run @ 8:00 PM PT (PST)
     # -------------------------
