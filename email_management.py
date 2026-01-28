@@ -251,34 +251,52 @@ def send_nhl_daily_report(
 
     def _compute_nhl_score(row: pd.Series) -> int:
         """
-        Score(0~100) = edge/EV/model_prob 기반 + 패널티(시장flip/극단 odds)
-        - 표시용 점수 (binary order 대체)
-        - 기존 eligible_order 로직(베팅판단)은 그대로 둠
+        Score(0~100) – 표시용 랭킹 점수
+
+        구성(권장):
+        - Edge%        : 시장 대비 우위 (핵심)
+        - EV($)        : 기대 수익(돈 단위)
+        - Win Prob     : 승률(안정성)
+        - Prob Advantage: (model_p - implied_p) (edge를 확률 관점에서 재확인)
+        + penalty: MARKET FLIP, 극단 odds
         """
-        edge_pct = _safe_float(row.get("edge_pct", 0.0), 0.0)         # already in % (e.g., 4.2)
-        ev_amt   = _safe_float(row.get("ev_amount", 0.0), 0.0)        # $ EV on $100 stake
-        model_p  = _safe_float(row.get("model_p", 0.0), 0.0)          # 0~1
+        edge_pct = _safe_float(row.get("edge_pct", 0.0), 0.0)       # % 단위 (예: 4.2)
+        ev_amt   = _safe_float(row.get("ev_amount", 0.0), 0.0)      # $ (stake=100)
+        model_p  = _safe_float(row.get("model_p", 0.0), 0.0)        # 0~1
+        implied_p = _safe_float(row.get("implied_p", np.nan), np.nan)
         odds     = _safe_float(row.get("american_odds", 0.0), 0.0)
         flip     = bool(row.get("disagree_flag", False))
 
-        # Components (all 0~1)
-        # Edge: 1%부터 점수 주고, 9%면 만점
+        # Components (0~1 scaling)
+        # Edge: 1%부터 점수, 9%면 만점
         c_edge = _clamp((edge_pct - 1.0) / 8.0, 0.0, 1.0)
 
-        # EV: $0부터 점수, $8 이상이면 만점 (stake=$100 기준)
-        c_ev = _clamp((ev_amt - 0.0) / 8.0, 0.0, 1.0)
+        # EV: $0부터 점수, $10 이상이면 만점
+        c_ev = _clamp(ev_amt / 10.0, 0.0, 1.0)
 
-        # Model prob: 0.50부터 점수, 0.60 이상이면 만점
-        c_p = _clamp((model_p - 0.50) / 0.10, 0.0, 1.0)
+        # Win Prob: 0.50부터 점수, 0.62 이상이면 만점 (NHL은 0.62면 꽤 강함)
+        c_p = _clamp((model_p - 0.50) / 0.12, 0.0, 1.0)
 
-        # Base score
-        score = 45.0 * c_edge + 25.0 * c_ev + 20.0 * c_p
+        # Prob Advantage: model_p - implied_p (0%부터 점수, 6%p면 만점)
+        if np.isnan(implied_p):
+            adv = 0.0
+        else:
+            adv = (model_p - implied_p)  # 0~1
+        c_adv = _clamp(adv / 0.06, 0.0, 1.0)
+
+        # Weighted sum (합이 100 되게 구성)
+        score = (
+            40.0 * c_edge +
+            25.0 * c_ev +
+            20.0 * c_p +
+            15.0 * c_adv
+        )
 
         # Penalties
         if flip:
-            score -= 10.0  # 시장 flip은 보수적으로 감점
+            score -= 10.0  # 시장 flip은 보수적으로
 
-        # 너무 극단 odds는 변동성↑ → 감점 (abs(odds) 250 넘으면 점점 감점)
+        # 극단 odds 패널티: abs(odds) 250 초과부터 최대 -10
         score -= 10.0 * _clamp((abs(odds) - 250.0) / 250.0, 0.0, 1.0)
 
         return int(round(_clamp(score, 0.0, 100.0)))
@@ -500,40 +518,7 @@ def send_nhl_daily_report(
             )
         text_lines.append("")
 
-    # ==============================
-    # 2) Today's bettable equity per game (Eligible only)
-    # ==============================
-    text_lines.append("2) Today's bettable equity per game (Eligible only)")
-    text_lines.append("-------------------------------------------------")
-
-    if top_games is None or top_games.empty:
-        text_lines.append("No bets today (no top_games).")
-        text_lines.append("")
-        bet_rows_final = pd.DataFrame()
-    else:
-        bet_base = top_games.copy()
-        bet_base["eligible_order"] = _eligible_by_edge(bet_base, edge_col=edge_col)
-        bet_base = bet_base[bet_base["eligible_order"]].copy()
-
-        n_elig = int(len(bet_base))
-        try:
-            total_daily_risk = float(NHL_TOTAL_DAILY_RISK) if NHL_TOTAL_DAILY_RISK is not None else 0.0
-        except Exception:
-            total_daily_risk = 0.0
-
-        if n_elig <= 0:
-            text_lines.append("Eligible bets: 0")
-            text_lines.append(f"Total daily risk: ${total_daily_risk:.2f}")
-            text_lines.append("Per-game equity: N/A")
-            text_lines.append("")
-            bet_rows_final = pd.DataFrame()
-        else:
-            per_game = total_daily_risk / n_elig
-            text_lines.append(f"Eligible bets: {n_elig}")
-            text_lines.append(f"Total daily risk: ${total_daily_risk:.2f}")
-            text_lines.append(f"Per-game bettable equity: ${per_game:.2f}")
-            text_lines.append("")
-            bet_rows_final = bet_base.copy()
+    
 
     plain_body = "\n".join(text_lines)
 
@@ -642,30 +627,7 @@ def send_nhl_daily_report(
             )
         html_parts.append("</table>")
 
-    html_parts.append("<h3>2) Today's bettable equity per game (Eligible only)</h3>")
-
-    if top_games is None or top_games.empty:
-        html_parts.append("<p>No bets today (no top_games).</p>")
-    else:
-        bet_base = top_games.copy()
-        bet_base["eligible_order"] = _eligible_by_edge(bet_base, edge_col=edge_col)
-        bet_base = bet_base[bet_base["eligible_order"]].copy()
-        n_elig = int(len(bet_base))
-
-        try:
-            total_daily_risk = float(NHL_TOTAL_DAILY_RISK) if NHL_TOTAL_DAILY_RISK is not None else 0.0
-        except Exception:
-            total_daily_risk = 0.0
-
-        if n_elig <= 0:
-            html_parts.append("<p>Eligible bets: 0</p>")
-            html_parts.append(f"<p>Total daily risk: ${total_daily_risk:.2f}</p>")
-            html_parts.append("<p>Per-game bettable equity: N/A</p>")
-        else:
-            per_game = total_daily_risk / n_elig
-            html_parts.append(f"<p>Eligible bets: <b>{n_elig}</b></p>")
-            html_parts.append(f"<p>Total daily risk: <b>${total_daily_risk:.2f}</b></p>")
-            html_parts.append(f"<p>Per-game bettable equity: <b>${per_game:.2f}</b></p>")
+    
 
     html_parts.append(
         "<div style='text-align:center; color:#888888; font-size:12px; margin-top:30px;'>"
