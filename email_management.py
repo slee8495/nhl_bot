@@ -202,6 +202,86 @@ def send_nhl_daily_report(
             return pd.to_numeric(s, errors="coerce")
         except Exception:
             return default
+        
+
+    # ------------------------------
+    # Score + HTML CSS (0~100)
+    # ------------------------------
+    NHL_EMAIL_CSS = """
+    <style>
+      body { font-family: Arial, Helvetica, sans-serif; }
+      table { border-collapse: collapse; width: 100%; font-size: 12px; }
+      th, td { border: 1px solid #ccc; padding: 4px; }
+
+      /* Score-based row gradient */
+      .s0 td { background: #ffffff; }
+      .s1 td { background: #f1f8f3; }  /* 35-49 */
+      .s2 td { background: #e3f3e8; }  /* 50-59 */
+      .s3 td { background: #cfead8; }  /* 60-69 */
+      .s4 td { background: #b7dfc4; }  /* 70-79 */
+      .s5 td { background: #8fd0a6; }  /* 80-89 */
+      .s6 td { background: #5fbe86; color:#0b2e13; font-weight: 700; } /* 90-100 */
+
+      .scorecell { font-weight: 900; }
+      .muted { color:#666; }
+    </style>
+    """
+
+    def _clamp(x: float, lo: float, hi: float) -> float:
+        return lo if x < lo else hi if x > hi else x
+
+    def _safe_float(x, default: float = 0.0) -> float:
+        try:
+            v = float(x)
+            if np.isnan(v):
+                return default
+            return v
+        except Exception:
+            return default
+
+    def _score_class(score: int) -> str:
+        s = int(score)
+        if s >= 90: return "s6"
+        if s >= 80: return "s5"
+        if s >= 70: return "s4"
+        if s >= 60: return "s3"
+        if s >= 50: return "s2"
+        if s >= 35: return "s1"
+        return "s0"
+
+    def _compute_nhl_score(row: pd.Series) -> int:
+        """
+        Score(0~100) = edge/EV/model_prob 기반 + 패널티(시장flip/극단 odds)
+        - 표시용 점수 (binary order 대체)
+        - 기존 eligible_order 로직(베팅판단)은 그대로 둠
+        """
+        edge_pct = _safe_float(row.get("edge_pct", 0.0), 0.0)         # already in % (e.g., 4.2)
+        ev_amt   = _safe_float(row.get("ev_amount", 0.0), 0.0)        # $ EV on $100 stake
+        model_p  = _safe_float(row.get("model_p", 0.0), 0.0)          # 0~1
+        odds     = _safe_float(row.get("american_odds", 0.0), 0.0)
+        flip     = bool(row.get("disagree_flag", False))
+
+        # Components (all 0~1)
+        # Edge: 1%부터 점수 주고, 9%면 만점
+        c_edge = _clamp((edge_pct - 1.0) / 8.0, 0.0, 1.0)
+
+        # EV: $0부터 점수, $8 이상이면 만점 (stake=$100 기준)
+        c_ev = _clamp((ev_amt - 0.0) / 8.0, 0.0, 1.0)
+
+        # Model prob: 0.50부터 점수, 0.60 이상이면 만점
+        c_p = _clamp((model_p - 0.50) / 0.10, 0.0, 1.0)
+
+        # Base score
+        score = 45.0 * c_edge + 25.0 * c_ev + 20.0 * c_p
+
+        # Penalties
+        if flip:
+            score -= 10.0  # 시장 flip은 보수적으로 감점
+
+        # 너무 극단 odds는 변동성↑ → 감점 (abs(odds) 250 넘으면 점점 감점)
+        score -= 10.0 * _clamp((abs(odds) - 250.0) / 250.0, 0.0, 1.0)
+
+        return int(round(_clamp(score, 0.0, 100.0)))
 
     # ------------------------------
     # Edge/EV rule config
@@ -362,6 +442,9 @@ def send_nhl_daily_report(
             axis=1,
         )
 
+        # ✅ Score(0~100) 계산 (표시용)
+        top_games["score"] = top_games.apply(_compute_nhl_score, axis=1)
+
         top_games["eligible_order"] = _eligible_by_edge(top_games, edge_col=edge_col)
         print("[EMAIL DEBUG] eligible count:", int(top_games["eligible_order"].sum()), " / ", len(top_games))
 
@@ -459,7 +542,8 @@ def send_nhl_daily_report(
     # ==============================
     html_parts: list[str] = []
     html_parts.append("<html>")
-    html_parts.append("<body style='font-family:Arial,Helvetica,sans-serif; font-size:14px; line-height:1.4;'>")
+    html_parts.append(NHL_EMAIL_CSS)
+    html_parts.append("<body style='font-size:14px; line-height:1.4;'>")
     html_parts.append("<h2>NHL Quant Bot – Daily Report</h2>")  # ✅ 변경
 
     if perf_summary and perf_summary.get("total_bets", 0) > 0:
@@ -502,7 +586,7 @@ def send_nhl_daily_report(
             "<th style='border:1px solid #ccc; padding:4px;'>Edge %</th>"
             "<th style='border:1px solid #ccc; padding:4px;'>EV ($)</th>"
             "<th style='border:1px solid #ccc; padding:4px;'>Signal</th>"
-            "<th style='border:1px solid #ccc; padding:4px;'>Order?</th>"
+            "<th style='border:1px solid #ccc; padding:4px;'>Score</th>"
             "</tr>"
         )
 
@@ -514,7 +598,7 @@ def send_nhl_daily_report(
             odds_str = _fmt_american(row.get("american_odds", ""))
             signal = str(row.get("signal", ""))
             ev_amount = float(row.get("ev_amount", 0.0))
-            sport = row.get("sport", "NHL")  # ✅ 변경
+            sport = row.get("sport", "NHL")
 
             xgb_s = row.get("p_xgb_str", "")
             mar_s = row.get("p_margin_str", "")
@@ -524,6 +608,7 @@ def send_nhl_daily_report(
             is_no_bet = bool(row.get("is_no_bet", False))
             is_market_flip = (signal.strip().upper() == "MARKET FLIP")
 
+            # 기존 텍스트 색 강조는 유지 (가독성)
             if eligible:
                 style = "color:#0a7a0a; font-weight:bold;"
             elif is_no_bet:
@@ -533,10 +618,11 @@ def send_nhl_daily_report(
             else:
                 style = ""
 
-            order_tag = "YES" if eligible else "no"
+            score = int(row.get("score", 0))
+            row_cls = _score_class(score)
 
             html_parts.append(
-                "<tr>"
+                f"<tr class='{row_cls}'>"
                 f"<td style='{td} text-align:center; {style}'>{int(row['Rank'])}</td>"
                 f"<td style='{td} {style}'>{sport}</td>"
                 f"<td style='{td} {style}'>{matchup}</td>"
@@ -551,7 +637,7 @@ def send_nhl_daily_report(
                 f"<td style='{td} text-align:right; {style}'>{float(row['edge_pct']):.2f}</td>"
                 f"<td style='{td} text-align:right; {style}'>{ev_amount:+.2f}</td>"
                 f"<td style='{td} text-align:center; {style}'>{signal}</td>"
-                f"<td style='{td} text-align:center; {style}'>{order_tag}</td>"
+                f"<td style='{td} text-align:center;' class='scorecell'>{score}</td>"
                 "</tr>"
             )
         html_parts.append("</table>")
