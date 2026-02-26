@@ -214,13 +214,7 @@ def send_nhl_daily_report(
       th, td { border: 1px solid #ccc; padding: 4px; }
 
       /* Score-based row gradient */
-      .s0 td { background: #ffffff; }
-      .s1 td { background: #f1f8f3; }  /* 35-49 */
-      .s2 td { background: #e3f3e8; }  /* 50-59 */
-      .s3 td { background: #cfead8; }  /* 60-69 */
-      .s4 td { background: #b7dfc4; }  /* 70-79 */
-      .s5 td { background: #8fd0a6; }  /* 80-89 */
-      .s6 td { background: #5fbe86; color:#0b2e13; font-weight: 700; } /* 90-100 */
+      .s0 td, .s1 td, .s2 td, .s3 td, .s4 td, .s5 td, .s6 td { background:#ffffff; }
 
       .scorecell { font-weight: 900; }
       .muted { color:#666; }
@@ -475,18 +469,33 @@ def send_nhl_daily_report(
         # ✅ One winner per matchup: highest model_p within each game_id
         top_games["model_winner"] = False
 
-        if "game_id" in top_games.columns and "model_p" in top_games.columns:
-            for gid, g in top_games.groupby("game_id"):
-                g_idx = g.index
-                mp = pd.to_numeric(g["model_p"], errors="coerce")
+        # ✅ One winner per matchup: ALWAYS exactly 1 row per matchup gets highlighted
+        # - Prefer game_id when valid
+        # - Fallback to (date + away + home) key when game_id is missing
+        top_games["model_winner"] = False
 
-                if mp.notna().any():
-                    win_idx = mp.idxmax()  # single row (first max)
-                else:
-                    win_idx = g_idx[0]     # fallback
+        # build a robust matchup key
+        gid = pd.to_numeric(top_games.get("game_id"), errors="coerce")
+        top_games["_match_key"] = np.where(
+            gid.notna(),
+            gid.astype("Int64").astype(str),
+            top_games.get("date").astype(str)
+            + "|" + top_games.get("away_team").astype(str)
+            + "|" + top_games.get("home_team").astype(str)
+        )
 
-                top_games.loc[win_idx, "model_winner"] = True
+        # choose winner by highest model_p (fallback p_xgb), always 1 per match_key
+        p = pd.to_numeric(top_games.get("model_p"), errors="coerce")
+        if p.isna().all() and "p_xgb" in top_games.columns:
+            p = pd.to_numeric(top_games.get("p_xgb"), errors="coerce")
+        top_games["_p_for_win"] = p.fillna(-1e9)
 
+        for mk, g in top_games.groupby("_match_key", sort=False):
+            win_idx = g["_p_for_win"].idxmax()
+            top_games.loc[win_idx, "model_winner"] = True
+
+        # cleanup temp cols (optional)
+        top_games.drop(columns=["_match_key", "_p_for_win"], inplace=True, errors="ignore")
     # ==============================
     # 1) Plain text body
     # ==============================
@@ -623,9 +632,7 @@ def send_nhl_daily_report(
                 style = ""
 
             score = int(row.get("score", 0))
-            row_cls = _score_class(score)
-
-            tr_cls = f"{row_cls}{' winner' if is_winner else ''}"
+            tr_cls = "winner" if is_winner else ""
             html_parts.append(
                 f"<tr class='{tr_cls}'>"
                 f"<td style='{td} text-align:center; {style}'>{int(row['Rank'])}</td>"
