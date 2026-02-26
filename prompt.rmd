@@ -1,3 +1,10 @@
+
+
+지금, 보면 초록색으로 색깔 칠해주는 로직 있지? 그거를 바꾸고 싶어. 
+모든 매치마다 하나씩. Model 이 이기고 있는 팀으로 칠해줘. 
+
+
+
 # email_management.py
 
 import smtplib
@@ -654,7 +661,3 @@ def send_nhl_daily_report(
         server.login(EMAIL_USER, EMAIL_PASSWORD)
         server.send_message(msg)
 
-
-======
-
-이렇게 하면 되는거야? 
