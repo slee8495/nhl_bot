@@ -224,6 +224,10 @@ def send_nhl_daily_report(
 
       .scorecell { font-weight: 900; }
       .muted { color:#666; }
+
+      /* ✅ Model winner highlight (one per matchup) */
+      .winner td { background: #e3f3e8 !important; font-weight: 700; }
+
     </style>
     """
 
@@ -468,6 +472,21 @@ def send_nhl_daily_report(
 
         top_games["is_no_bet"] = ~top_games["eligible_order"].astype(bool)
 
+        # ✅ One winner per matchup: highest model_p within each game_id
+        top_games["model_winner"] = False
+
+        if "game_id" in top_games.columns and "model_p" in top_games.columns:
+            for gid, g in top_games.groupby("game_id"):
+                g_idx = g.index
+                mp = pd.to_numeric(g["model_p"], errors="coerce")
+
+                if mp.notna().any():
+                    win_idx = mp.idxmax()  # single row (first max)
+                else:
+                    win_idx = g_idx[0]     # fallback
+
+                top_games.loc[win_idx, "model_winner"] = True
+
     # ==============================
     # 1) Plain text body
     # ==============================
@@ -589,14 +608,14 @@ def send_nhl_daily_report(
             mar_s = row.get("p_margin_str", "")
             elo_s = row.get("p_elo_str", "")
 
+            is_winner = bool(row.get("model_winner", False))
             eligible = bool(row.get("eligible_order", False))
             is_no_bet = bool(row.get("is_no_bet", False))
             is_market_flip = (signal.strip().upper() == "MARKET FLIP")
 
-            # 기존 텍스트 색 강조는 유지 (가독성)
-            if eligible:
-                style = "color:#0a7a0a; font-weight:bold;"
-            elif is_no_bet:
+            # ✅ winner는 row 배경으로 표시 (green fill)
+            # 텍스트 색은 no_bet / market_flip만 유지
+            if is_no_bet:
                 style = "color:#cc0000;"
             elif is_market_flip:
                 style = "color:#0066cc; font-weight:bold;"
@@ -606,8 +625,9 @@ def send_nhl_daily_report(
             score = int(row.get("score", 0))
             row_cls = _score_class(score)
 
+            tr_cls = f"{row_cls}{' winner' if is_winner else ''}"
             html_parts.append(
-                f"<tr class='{row_cls}'>"
+                f"<tr class='{tr_cls}'>"
                 f"<td style='{td} text-align:center; {style}'>{int(row['Rank'])}</td>"
                 f"<td style='{td} {style}'>{sport}</td>"
                 f"<td style='{td} {style}'>{matchup}</td>"
