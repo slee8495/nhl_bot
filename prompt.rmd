@@ -1,3 +1,47 @@
+      /* Score-based row gradient (DISABLED: keep rows white) */
+      .s0 td, .s1 td, .s2 td, .s3 td, .s4 td, .s5 td, .s6 td { background:#ffffff; }
+
+--
+
+        # ✅ One winner per matchup: ALWAYS exactly 1 row per matchup gets highlighted
+        # - Prefer game_id when valid
+        # - Fallback to (date + away + home) key when game_id is missing
+        top_games["model_winner"] = False
+
+        # build a robust matchup key
+        gid = pd.to_numeric(top_games.get("game_id"), errors="coerce")
+        top_games["_match_key"] = np.where(
+            gid.notna(),
+            gid.astype("Int64").astype(str),
+            top_games.get("date").astype(str)
+            + "|" + top_games.get("away_team").astype(str)
+            + "|" + top_games.get("home_team").astype(str)
+        )
+
+        # choose winner by highest model_p (fallback p_xgb), always 1 per match_key
+        p = pd.to_numeric(top_games.get("model_p"), errors="coerce")
+        if p.isna().all() and "p_xgb" in top_games.columns:
+            p = pd.to_numeric(top_games.get("p_xgb"), errors="coerce")
+        top_games["_p_for_win"] = p.fillna(-1e9)
+
+        for mk, g in top_games.groupby("_match_key", sort=False):
+            win_idx = g["_p_for_win"].idxmax()
+            top_games.loc[win_idx, "model_winner"] = True
+
+        # cleanup temp cols (optional)
+        top_games.drop(columns=["_match_key", "_p_for_win"], inplace=True, errors="ignore")
+
+--
+
+            row_cls = _score_class(score)
+            tr_cls = f"{row_cls}{' winner' if is_winner else ''}"
+
+--
+
+            tr_cls = "winner" if is_winner else ""
+
+--
+
 
 
 색깔이 다 칠해진것도 있고, 아닌것도 있어. 
