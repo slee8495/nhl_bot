@@ -469,10 +469,7 @@ def send_nhl_daily_report(
         # ✅ One winner per matchup: highest model_p within each game_id
         top_games["model_winner"] = False
 
-        # ✅ One winner per matchup: ALWAYS exactly 1 row per matchup gets highlighted
-        # - Prefer game_id when valid
-        # - Fallback to (date + away + home) key when game_id is missing
-        top_games["model_winner"] = False
+
 
         # build a robust matchup key
         gid = pd.to_numeric(top_games.get("game_id"), errors="coerce")
@@ -631,25 +628,28 @@ def send_nhl_daily_report(
             else:
                 style = ""
 
+            # ✅ WINNER background must be INLINE for email clients (Gmail-safe)
+            winner_bg = "background:#e3f3e8; font-weight:700;" if is_winner else ""
+
             score = int(row.get("score", 0))
             tr_cls = "winner" if is_winner else ""
             html_parts.append(
                 f"<tr class='{tr_cls}'>"
-                f"<td style='{td} text-align:center; {style}'>{int(row['Rank'])}</td>"
-                f"<td style='{td} {style}'>{sport}</td>"
-                f"<td style='{td} {style}'>{matchup}</td>"
-                f"<td style='{td} {style}'>{bet_label}</td>"
-                f"<td style='{td} {style}'>{row.get('bookmaker','')}</td>"
-                f"<td style='{td} text-align:right; {style}'>{odds_str}</td>"
-                f"<td style='{td} text-align:right; {style}'>{xgb_s}</td>"
-                f"<td style='{td} text-align:right; {style}'>{mar_s}</td>"
-                f"<td style='{td} text-align:right; {style}'>{elo_s}</td>"
-                f"<td style='{td} text-align:right; {style}'>{float(row['model_p_pct']):.2f}</td>"
-                f"<td style='{td} text-align:right; {style}'>{float(row['implied_p_pct']):.2f}</td>"
-                f"<td style='{td} text-align:right; {style}'>{float(row['edge_pct']):.2f}</td>"
-                f"<td style='{td} text-align:right; {style}'>{ev_amount:+.2f}</td>"
-                f"<td style='{td} text-align:center; {style}'>{signal}</td>"
-                f"<td style='{td} text-align:center;' class='scorecell'>{score}</td>"
+                f"<td style='{td} text-align:center; {style} {winner_bg}'>{int(row['Rank'])}</td>"
+                f"<td style='{td} {style} {winner_bg}'>{sport}</td>"
+                f"<td style='{td} {style} {winner_bg}'>{matchup}</td>"
+                f"<td style='{td} {style} {winner_bg}'>{bet_label}</td>"
+                f"<td style='{td} {style} {winner_bg}'>{row.get('bookmaker','')}</td>"
+                f"<td style='{td} text-align:right; {style} {winner_bg}'>{odds_str}</td>"
+                f"<td style='{td} text-align:right; {style} {winner_bg}'>{xgb_s}</td>"
+                f"<td style='{td} text-align:right; {style} {winner_bg}'>{mar_s}</td>"
+                f"<td style='{td} text-align:right; {style} {winner_bg}'>{elo_s}</td>"
+                f"<td style='{td} text-align:right; {style} {winner_bg}'>{float(row['model_p_pct']):.2f}</td>"
+                f"<td style='{td} text-align:right; {style} {winner_bg}'>{float(row['implied_p_pct']):.2f}</td>"
+                f"<td style='{td} text-align:right; {style} {winner_bg}'>{float(row['edge_pct']):.2f}</td>"
+                f"<td style='{td} text-align:right; {style} {winner_bg}'>{ev_amount:+.2f}</td>"
+                f"<td style='{td} text-align:center; {style} {winner_bg}'>{signal}</td>"
+                f"<td style='{td} text-align:center; {winner_bg}' class='scorecell'>{score}</td>"
                 "</tr>"
             )
         html_parts.append("</table>")
