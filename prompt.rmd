@@ -1,3 +1,49 @@
+
+            is_winner = bool(row.get("model_winner", False))
+...
+            if is_no_bet:
+                style = "color:#cc0000;"
+            elif is_market_flip:
+                style = "color:#0066cc; font-weight:bold;"
+            else:
+                style = ""
+
+--
+
+            # ✅ WINNER background must be INLINE for email clients (Gmail-safe)
+            winner_bg = "background:#e3f3e8; font-weight:700;" if is_winner else ""
+
+--
+
+f"<td style='{td} text-align:center; {style}'>{int(row['Rank'])}</td>"
+
+--
+
+f"<td style='{td} text-align:center; {style} {winner_bg}'>{int(row['Rank'])}</td>"
+
+--
+
+f"<td style='{td} {style} {winner_bg}'>{sport}</td>"
+f"<td style='{td} {style} {winner_bg}'>{matchup}</td>"
+f"<td style='{td} {style} {winner_bg}'>{bet_label}</td>"
+f"<td style='{td} text-align:right; {style} {winner_bg}'>{odds_str}</td>"
+...
+f"<td style='{td} text-align:center; {style} {winner_bg}'>{signal}</td>"
+f"<td style='{td} text-align:center; {winner_bg}' class='scorecell'>{score}</td>"
+
+--
+
+        # ✅ One winner per matchup: highest model_p within each game_id
+        top_games["model_winner"] = False
+
+        # ✅ One winner per matchup: ALWAYS exactly 1 row per matchup gets highlighted
+        ...
+        top_games["model_winner"] = False
+
+--
+
+
+
 # email_management.py
 
 import smtplib
