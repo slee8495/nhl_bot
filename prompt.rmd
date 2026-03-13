@@ -1,1223 +1,230 @@
 
-            is_winner = bool(row.get("model_winner", False))
-...
-            if is_no_bet:
-                style = "color:#cc0000;"
-            elif is_market_flip:
-                style = "color:#0066cc; font-weight:bold;"
-            else:
-                style = ""
 
---
-
-            # ✅ WINNER background must be INLINE for email clients (Gmail-safe)
-            winner_bg = "background:#e3f3e8; font-weight:700;" if is_winner else ""
-
---
-
-f"<td style='{td} text-align:center; {style}'>{int(row['Rank'])}</td>"
-
---
-
-f"<td style='{td} text-align:center; {style} {winner_bg}'>{int(row['Rank'])}</td>"
-
---
-
-f"<td style='{td} {style} {winner_bg}'>{sport}</td>"
-f"<td style='{td} {style} {winner_bg}'>{matchup}</td>"
-f"<td style='{td} {style} {winner_bg}'>{bet_label}</td>"
-f"<td style='{td} text-align:right; {style} {winner_bg}'>{odds_str}</td>"
-...
-f"<td style='{td} text-align:center; {style} {winner_bg}'>{signal}</td>"
-f"<td style='{td} text-align:center; {winner_bg}' class='scorecell'>{score}</td>"
-
---
-
-        # ✅ One winner per matchup: highest model_p within each game_id
-        top_games["model_winner"] = False
-
-        # ✅ One winner per matchup: ALWAYS exactly 1 row per matchup gets highlighted
-        ...
-        top_games["model_winner"] = False
-
---
-
-
-
-# email_management.py
-
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.header import Header
-from datetime import datetime
-import pandas as pd
-import numpy as np
-
-from config import (
-    EMAIL_HOST,
-    EMAIL_PORT,
-    EMAIL_USER,
-    EMAIL_PASSWORD,
-    EMAIL_TO,
-    NHL_TOTAL_DAILY_RISK,
-)
-
-
-def _calc_return_amount(odds: float, stake: float = 100.0) -> float:
-    try:
-        o = float(odds)
-    except Exception:
-        return stake
-
-    if o > 0:
-        profit = stake * (o / 100)
-    else:
-        profit = stake * (100 / abs(o))
-
-    return stake + profit
-
-
-def _fmt_american(odds) -> str:
-    """Format American odds with + / - sign."""
-    try:
-        o = float(odds)
-        return f"{o:+.0f}"
-    except Exception:
-        return str(odds)
-
-
-def _calc_ev_amount(odds: float, model_p: float, stake: float = 100.0) -> float:
-    """
-    Expected value in dollars for a given bet (American odds, model win prob).
-    EV = p*profit_if_win + (1-p)*(-stake)
-    """
-    try:
-        o = float(odds)
-    except Exception:
-        return 0.0
-
-    if o > 0:
-        profit_if_win = stake * (o / 100.0)
-    else:
-        profit_if_win = stake * (100.0 / abs(o))
-
-    ev = model_p * profit_if_win - (1.0 - model_p) * stake
-    return ev
-
-
-def _fmt_profit_pct(odds) -> str:
-    """
-    Return profit percentage as string without the plus sign, e.g.
-    +310 -> "310", -286 -> "34.9"
-    """
-    try:
-        o = float(odds)
-    except Exception:
-        return "0.0"
-
-    if o > 0:
-        return f"{o:.0f}"
-    else:
-        pct = 10000.0 / abs(o)
-        return f"{pct:.1f}"
-
-
-def _kelly_fraction(model_p: float, american_odds: float) -> float:
-    """
-    Kelly fraction f* 계산 (bankroll 대비 비율).
-    반환:
-      - 음수면 0으로 클립 (no bet)
-      - 정상 범위 [0, 1] 내에서만 사용
-    """
-    try:
-        p = float(model_p)
-        o = float(american_odds)
-    except Exception:
-        return 0.0
-
-    if p <= 0.0 or p >= 1.0:
-        return 0.0
-
-    if o > 0:
-        b = o / 100.0
-    else:
-        b = 100.0 / abs(o)
-
-    q = 1.0 - p
-    f_star = (b * p - q) / b
-    if f_star <= 0.0:
-        return 0.0
-
-    return min(f_star, 0.5)
-
-
-def _apply_kelly_sizing(bet_rows: pd.DataFrame, total_daily_risk: float) -> pd.DataFrame:
-    """
-    균등 스테이크 배분 (Equal-weight sizing)
-    - total_daily_risk 를 베팅 개수 N으로 나눠서 동일 stake 배정
-    - 기존 컬럼 호환을 위해 weight/kelly_f 유지
-    """
-    if bet_rows is None or bet_rows.empty:
-        return bet_rows
-
-    bet_rows = bet_rows.copy()
-    n_bets = len(bet_rows)
-    if n_bets <= 0:
-        return bet_rows
-
-    try:
-        total_daily_risk = float(total_daily_risk)
-    except Exception:
-        total_daily_risk = 100.0 * n_bets
-
-    equal_stake = total_daily_risk / n_bets
-    bet_rows["weight"] = 1.0 / n_bets
-    bet_rows["stake"] = round(equal_stake, 2)
-
-    # 호환/디버깅용
-    bet_rows["kelly_f"] = 0.0
-    return bet_rows
-
-
-def send_nhl_daily_report(
-    reco_df: pd.DataFrame,
-    full_df: pd.DataFrame,
-    perf_summary: dict | None = None,
-) -> None:
-    """Send daily NHL report email in ENGLISH."""
-    has_full = full_df is not None and not full_df.empty
-
-
-    # =========================================================
-    # ✅ NHL/NBA 컬럼명 차이 흡수: 여기서 표준 컬럼을 강제로 만든다
-    #   - elig 로직이 p_xgb / model_p / implied_p / american_odds 를 전제로 함
-    # =========================================================
-    def _ensure_col(df: pd.DataFrame, target: str, candidates: list[str]) -> pd.DataFrame:
-        if target in df.columns:
-            return df
-        for c in candidates:
-            if c in df.columns:
-                df[target] = df[c]
-                return df
-        df[target] = np.nan
-        return df
-
-    def _american_to_prob(o):
-        try:
-            o = float(o)
-        except Exception:
-            return np.nan
-        if o > 0:
-            return 100.0 / (o + 100.0)
-        return (-o) / ((-o) + 100.0)
-
-    if has_full:
-        full_df = full_df.copy()
-
-        # --- odds / implied ---
-        full_df = _ensure_col(full_df, "american_odds", ["american_odds", "odds", "moneyline_odds"])
-        full_df["american_odds"] = pd.to_numeric(full_df["american_odds"], errors="coerce")
-
-        # implied_p가 비었으면 american_odds로 계산해서 채움
-        if "implied_p" not in full_df.columns:
-            full_df["implied_p"] = np.nan
-        if full_df["implied_p"].isna().all():
-            full_df["implied_p"] = full_df["american_odds"].apply(_american_to_prob)
-
-        # --- model probabilities ---
-        full_df = _ensure_col(full_df, "p_xgb", ["p_xgb", "p_win_xgb", "win_prob_xgb", "p_win", "p_pred"])
-        full_df["p_xgb"] = pd.to_numeric(full_df["p_xgb"], errors="coerce")
-
-        # model_p가 없으면 p_xgb로 fallback (NHL은 ensemble 컬럼명이 다를 수 있음)
-        full_df = _ensure_col(full_df, "model_p", ["model_p", "p_model", "p_final", "p_ensemble", "p_win"])
-        full_df["model_p"] = pd.to_numeric(full_df["model_p"], errors="coerce")
-        full_df["model_p"] = full_df["model_p"].fillna(full_df["p_xgb"])
-
-    # ------------------------------
-    # Helpers
-    # ------------------------------
-    def _fmt_prob(x) -> str:
-        try:
-            return f"{float(x):.2f}"
-        except Exception:
-            return ""
-
-    def _to_num(s, default=np.nan):
-        try:
-            return pd.to_numeric(s, errors="coerce")
-        except Exception:
-            return default
-        
-
-    # ------------------------------
-    # Score + HTML CSS (0~100)
-    # ------------------------------
-    NHL_EMAIL_CSS = """
-    <style>
-      body { font-family: Arial, Helvetica, sans-serif; }
-      table { border-collapse: collapse; width: 100%; font-size: 12px; }
-      th, td { border: 1px solid #ccc; padding: 4px; }
-
-      /* Score-based row gradient */
-      .s0 td, .s1 td, .s2 td, .s3 td, .s4 td, .s5 td, .s6 td { background:#ffffff; }
-
-      .scorecell { font-weight: 900; }
-      .muted { color:#666; }
-
-      /* ✅ Model winner highlight (one per matchup) */
-      .winner td { background: #e3f3e8 !important; font-weight: 700; }
-
-    </style>
-    """
-
-    def _clamp(x: float, lo: float, hi: float) -> float:
-        return lo if x < lo else hi if x > hi else x
-
-    def _safe_float(x, default: float = 0.0) -> float:
-        try:
-            v = float(x)
-            if np.isnan(v):
-                return default
-            return v
-        except Exception:
-            return default
-
-    def _score_class(score: int) -> str:
-        s = int(score)
-        if s >= 90: return "s6"
-        if s >= 80: return "s5"
-        if s >= 70: return "s4"
-        if s >= 60: return "s3"
-        if s >= 50: return "s2"
-        if s >= 35: return "s1"
-        return "s0"
-
-    def _compute_nhl_score(row: pd.Series) -> int:
-        """
-        Score(0~100) – 표시용 랭킹 점수
-
-        구성(권장):
-        - Edge%        : 시장 대비 우위 (핵심)
-        - EV($)        : 기대 수익(돈 단위)
-        - Win Prob     : 승률(안정성)
-        - Prob Advantage: (model_p - implied_p) (edge를 확률 관점에서 재확인)
-        + penalty: MARKET FLIP, 극단 odds
-        """
-        edge_pct = _safe_float(row.get("edge_pct", 0.0), 0.0)       # % 단위 (예: 4.2)
-        ev_amt   = _safe_float(row.get("ev_amount", 0.0), 0.0)      # $ (stake=100)
-        model_p  = _safe_float(row.get("model_p", 0.0), 0.0)        # 0~1
-        implied_p = _safe_float(row.get("implied_p", np.nan), np.nan)
-        odds     = _safe_float(row.get("american_odds", 0.0), 0.0)
-        flip     = bool(row.get("disagree_flag", False))
-
-        # Components (0~1 scaling)
-        # Edge: 1%부터 점수, 9%면 만점
-        c_edge = _clamp((edge_pct - 1.0) / 8.0, 0.0, 1.0)
-
-        # EV: $0부터 점수, $10 이상이면 만점
-        c_ev = _clamp(ev_amt / 10.0, 0.0, 1.0)
-
-        # Win Prob: 0.50부터 점수, 0.62 이상이면 만점 (NHL은 0.62면 꽤 강함)
-        c_p = _clamp((model_p - 0.50) / 0.12, 0.0, 1.0)
-
-        # Prob Advantage: model_p - implied_p (0%부터 점수, 6%p면 만점)
-        if np.isnan(implied_p):
-            adv = 0.0
-        else:
-            adv = (model_p - implied_p)  # 0~1
-        c_adv = _clamp(adv / 0.06, 0.0, 1.0)
-
-        # Weighted sum (합이 100 되게 구성)
-        score = (
-            40.0 * c_edge +
-            25.0 * c_ev +
-            20.0 * c_p +
-            15.0 * c_adv
-        )
-
-        # Penalties
-        if flip:
-            score -= 10.0  # 시장 flip은 보수적으로
-
-        # 극단 odds 패널티: abs(odds) 250 초과부터 최대 -10
-        score -= 10.0 * _clamp((abs(odds) - 250.0) / 250.0, 0.0, 1.0)
-
-        return int(round(_clamp(score, 0.0, 100.0)))
-
-    # ------------------------------
-    # Edge/EV rule config
-    # ------------------------------
-    EDGE_MIN_NORMAL = 3.0
-    EDGE_MIN_NORMAL_PLUS200 = 5.0
-
-    EDGE_MIN_FLIP = 6.0
-    EDGE_MIN_FLIP_PLUS200 = 8.0
-
-    XGB_MIN = 0.50
-    MODEL_MIN = 0.50
-
-    AUTO_YES_EDGE_MIN = 1.0      # edge% (percent)  # (현재 로직에서는 -1.0 사용중)
-    AUTO_YES_MAX_ABS_ODDS = 250  # -250 ~ +250
-    AUTO_YES_ONLY_NON_FLIP = True
-
-    MAX_ORDERS = 10
-    UNDERDOG_ONLY = False
-
-    USE_AGREEMENT_FILTER = False  # 합의(2/3) 필터 제거 상태 유지
-
-    def _edge_pct(df: pd.DataFrame, edge_col: str) -> pd.Series:
-        return (_to_num(df.get(edge_col)) * 100.0)
-
-    def _market_flip_mask(df: pd.DataFrame) -> pd.Series:
-        mp = _to_num(df.get("model_p"))
-        ip = _to_num(df.get("implied_p"))
-        return ((mp >= 0.5) & (ip < 0.5)) | ((mp <= 0.5) & (ip > 0.5))
-
-    def _agreement_ok_with_min(df: pd.DataFrame, p_min: float) -> pd.Series:
-        xgb = _to_num(df.get("p_xgb"))
-        mar = _to_num(df.get("p_margin"))
-        elo = _to_num(df.get("p_elo"))
-
-        P = np.vstack([xgb.values, mar.values, elo.values]).T.astype(float)
-        valid_cnt = np.sum(~np.isnan(P), axis=1)
-        has_2 = valid_cnt >= 2
-
-        agree_cnt = np.nansum((P >= 0.50).astype(float), axis=1)
-        agree_ok = agree_cnt >= 2
-
-        P2 = np.where(np.isnan(P), -1e9, P)
-        second_best = np.sort(P2, axis=1)[:, -2]
-        pmin_ok = second_best >= float(p_min)
-
-        return has_2 & agree_ok & pmin_ok
-
-    def _eligible_by_edge(df: pd.DataFrame, edge_col: str) -> pd.Series:
-        edgep = _edge_pct(df, edge_col)
-        flip = _market_flip_mask(df)
-
-        odds = _to_num(df.get("american_odds"))
-        mp = _to_num(df.get("model_p"))
-        xgb = _to_num(df.get("p_xgb"))
-
-        base_prob_ok = (xgb >= XGB_MIN) & (mp >= MODEL_MIN)
-
-        is_plus200 = (odds >= 200)
-        req_edge_normal = np.where(is_plus200, EDGE_MIN_NORMAL_PLUS200, EDGE_MIN_NORMAL)
-        req_edge_flip = np.where(is_plus200, EDGE_MIN_FLIP_PLUS200, EDGE_MIN_FLIP)
-        req_edge = np.where(flip, req_edge_flip, req_edge_normal)
-
-        EDGE_FLOOR = -3.0
-        elig = (edgep >= req_edge) & base_prob_ok
-
-        # soft yes
-        soft_yes = base_prob_ok & (edgep >= EDGE_FLOOR) & (odds.abs() <= AUTO_YES_MAX_ABS_ODDS)
-        if AUTO_YES_ONLY_NON_FLIP:
-            soft_yes = soft_yes & (~flip)
-        elig = elig | soft_yes
-
-        if UNDERDOG_ONLY:
-            elig = elig & (odds > 0)
-
-        # 기존 auto_yes
-        auto_yes = (
-            (xgb >= 0.55) &
-            (mp >= 0.55) &
-            (odds.abs() <= AUTO_YES_MAX_ABS_ODDS) &
-            (edgep >= -1.0)
-        )
-        if AUTO_YES_ONLY_NON_FLIP:
-            auto_yes = auto_yes & (~flip)
-
-        # =========================
-        # EV 계산 (stake=$100 기준)
-        # =========================
-        EV_MIN_USD = 2.0  # ✅ 하드컷 기준
-        if "ev_amount" in df.columns:
-            ev_amount = _to_num(df.get("ev_amount"))
-        else:
-            ev_amount = df.apply(
-                lambda r: _calc_ev_amount(r.get("american_odds", np.nan), r.get("model_p", np.nan), stake=100.0),
-                axis=1,
-            )
-            ev_amount = pd.to_numeric(ev_amount, errors="coerce")
-
-        # 최종 eligible: edge/soft/auto 중 하나라도 YES면 통과 가능
-        elig = elig.astype(bool) | auto_yes.astype(bool)
-
-        # ✅ HARD GATE: EV < 2면 어떤 경우든 무조건 컷
-        elig = elig & (ev_amount >= EV_MIN_USD)
-
-        return elig
-
-
-    # ==============================
-    # 0) Top table: best book per (game_id, side)
-    # ==============================
-    top_games = None
-    edge_col = "edge"
-
-    if has_full:
-        tmp = full_df.copy()
-
-        if "edge_used" in tmp.columns:
-            edge_col = "edge_used"
-        elif "edge_with_move" in tmp.columns:
-            edge_col = "edge_with_move"
-        else:
-            edge_col = "edge"
-
-        tmp = tmp.sort_values(edge_col, ascending=False)
-        best_by_game_side = tmp.groupby(["game_id", "side"], as_index=False).head(1)
-
-        if "sport" in best_by_game_side.columns:
-            sort_cols = ["sport", "date", "home_team", "away_team", edge_col]
-            asc = [True, True, True, True, False]
-        else:
-            sort_cols = ["date", "home_team", "away_team", edge_col]
-            asc = [True, True, True, False]
-
-        top_games = best_by_game_side.sort_values(sort_cols, ascending=asc).reset_index(drop=True)
-        top_games.insert(0, "Rank", top_games.index + 1)
-
-        top_games["model_p_pct"] = (_to_num(top_games.get("model_p")) * 100.0).round(2)
-        top_games["implied_p_pct"] = (_to_num(top_games.get("implied_p")) * 100.0).round(2)
-        top_games["edge_pct"] = (_to_num(top_games.get(edge_col)) * 100.0).round(2)
-
-        for col in ["p_xgb", "p_margin", "p_elo"]:
-            if col in top_games.columns:
-                top_games[col + "_str"] = top_games[col].apply(_fmt_prob)
-            else:
-                top_games[col] = np.nan
-                top_games[col + "_str"] = ""
-
-        if "sport" not in top_games.columns:
-            top_games["sport"] = "NHL"  # ✅ 변경
-
-        mp = _to_num(top_games.get("model_p"))
-        ip = _to_num(top_games.get("implied_p"))
-        top_games["disagree_flag"] = ((mp >= 0.5) & (ip < 0.5)) | ((mp <= 0.5) & (ip > 0.5))
-        top_games["signal"] = np.where(top_games["disagree_flag"], "MARKET FLIP", "")
-
-        top_games["ev_amount"] = top_games.apply(
-            lambda r: _calc_ev_amount(r.get("american_odds", 0.0), r.get("model_p", 0.0), stake=100.0),
-            axis=1,
-        )
-
-        # ✅ Score(0~100) 계산 (표시용)
-        top_games["score"] = top_games.apply(_compute_nhl_score, axis=1)
-
-        top_games["eligible_order"] = _eligible_by_edge(top_games, edge_col=edge_col)
-        print("[EMAIL DEBUG] eligible count:", int(top_games["eligible_order"].sum()), " / ", len(top_games))
-
-        top_games["is_no_bet"] = ~top_games["eligible_order"].astype(bool)
-
-        # ✅ One winner per matchup: highest model_p within each game_id
-        top_games["model_winner"] = False
-
-        # ✅ One winner per matchup: ALWAYS exactly 1 row per matchup gets highlighted
-        # - Prefer game_id when valid
-        # - Fallback to (date + away + home) key when game_id is missing
-        top_games["model_winner"] = False
-
-        # build a robust matchup key
-        gid = pd.to_numeric(top_games.get("game_id"), errors="coerce")
-        top_games["_match_key"] = np.where(
-            gid.notna(),
-            gid.astype("Int64").astype(str),
-            top_games.get("date").astype(str)
-            + "|" + top_games.get("away_team").astype(str)
-            + "|" + top_games.get("home_team").astype(str)
-        )
-
-        # choose winner by highest model_p (fallback p_xgb), always 1 per match_key
-        p = pd.to_numeric(top_games.get("model_p"), errors="coerce")
-        if p.isna().all() and "p_xgb" in top_games.columns:
-            p = pd.to_numeric(top_games.get("p_xgb"), errors="coerce")
-        top_games["_p_for_win"] = p.fillna(-1e9)
-
-        for mk, g in top_games.groupby("_match_key", sort=False):
-            win_idx = g["_p_for_win"].idxmax()
-            top_games.loc[win_idx, "model_winner"] = True
-
-        # cleanup temp cols (optional)
-        top_games.drop(columns=["_match_key", "_p_for_win"], inplace=True, errors="ignore")
-    # ==============================
-    # 1) Plain text body
-    # ==============================
-    text_lines: list[str] = []
-    text_lines.append("NHL Quant Bot – Daily Report")  # ✅ 변경
-    text_lines.append("")
-
-    if perf_summary:
-        text_lines.append(f"0) Performance Summary (since {perf_summary.get('start_date', 'N/A')})")
-        text_lines.append("--------------------------------------------------")
-        settled = perf_summary.get("total_bets", 0)
-        wins = perf_summary.get("wins", 0)
-        losses = perf_summary.get("losses", 0)
-        win_rate = perf_summary.get("win_rate", None)
-        roi = perf_summary.get("roi", None)
-        total_pnl = perf_summary.get("total_pnl", 0.0)
-
-        text_lines.append(f"Settled bets : {settled} (wins {wins} / losses {losses})")
-        if win_rate is not None:
-            text_lines.append(f"Win rate     : {win_rate*100:.2f}%")
-        if roi is not None:
-            text_lines.append(f"ROI          : {roi*100:.2f}%")
-        text_lines.append(f"Total PnL    : {total_pnl:.2f} USD")
-        text_lines.append("")
-
-    text_lines.append("1) Top Games by Model Edge (best bookmaker per side)")
-    text_lines.append("--------------------------------------------------")
-
-    if top_games is None or top_games.empty:
-        text_lines.append("No odds / edge data available today.")
-        text_lines.append("")
-    else:
-        for _, row in top_games.iterrows():
-            matchup = f"{row['away_team']} @ {row['home_team']}"
-            side = str(row["side"]).upper()
-            odds_str = _fmt_american(row.get("american_odds", ""))
-
-            ev_str = f"{float(row.get('ev_amount', 0.0)):+.2f}"
-            tag = f" [{row['signal']}]" if str(row.get("signal", "")).strip() else ""
-
-            extra = f" | XGB={row.get('p_xgb_str','')}, M={row.get('p_margin_str','')}, Elo={row.get('p_elo_str','')}"
-            elig = " ✅ELIGIBLE" if bool(row.get("eligible_order", False)) else ""
-
-            text_lines.append(
-                f"#{int(row['Rank'])} {matchup} – {row['team']} ({side}) {odds_str}, "
-                f"model={float(row['model_p_pct']):.2f}% vs implied={float(row['implied_p_pct']):.2f}%, "
-                f"edge={float(row['edge_pct']):.2f}%, EV=${ev_str}{tag}{extra}{elig}"
-            )
-        text_lines.append("")
-
-    
-
-    plain_body = "\n".join(text_lines)
-
-    # ==============================
-    # 3) HTML body
-    # ==============================
-    html_parts: list[str] = []
-    html_parts.append("<html>")
-    html_parts.append(NHL_EMAIL_CSS)
-    html_parts.append("<body style='font-size:14px; line-height:1.4;'>")
-    html_parts.append("<h2>NHL Quant Bot – Daily Report</h2>")  # ✅ 변경
-
-    if perf_summary and perf_summary.get("total_bets", 0) > 0:
-        html_parts.append("<h3>0) Performance Summary</h3>")
-        html_parts.append("<ul>")
-        html_parts.append(f"<li>Since: {perf_summary.get('start_date', 'N/A')}</li>")
-        html_parts.append(
-            f"<li>Settled bets: {perf_summary.get('total_bets', 0)} "
-            f"(wins {perf_summary.get('wins', 0)} / losses {perf_summary.get('losses', 0)})</li>"
-        )
-        win_rate = perf_summary.get("win_rate", None)
-        roi = perf_summary.get("roi", None)
-        total_pnl = perf_summary.get("total_pnl", 0.0)
-        if win_rate is not None:
-            html_parts.append(f"<li>Win rate: {win_rate*100:.2f}%</li>")
-        if roi is not None:
-            html_parts.append(f"<li>ROI: {roi*100:.2f}% (PnL / total stake)</li>")
-        html_parts.append(f"<li>Total PnL: {total_pnl:.2f} USD</li>")
-        html_parts.append("</ul>")
-
-    html_parts.append("<h3>1) Top Games by Model Edge (best bookmaker per side)</h3>")
-
-    if top_games is None or top_games.empty:
-        html_parts.append("<p>No odds / edge data available today.</p>")
-    else:
-        html_parts.append("<table style='border-collapse:collapse; width:100%; font-size:12px;'>")
-        html_parts.append(
-            "<tr>"
-            "<th style='border:1px solid #ccc; padding:4px;'>Rank</th>"
-            "<th style='border:1px solid #ccc; padding:4px;'>Sport</th>"
-            "<th style='border:1px solid #ccc; padding:4px;'>Matchup</th>"
-            "<th style='border:1px solid #ccc; padding:4px;'>Bet</th>"
-            "<th style='border:1px solid #ccc; padding:4px;'>Book</th>"
-            "<th style='border:1px solid #ccc; padding:4px;'>Odds</th>"
-            "<th style='border:1px solid #ccc; padding:4px;'>XGB</th>"
-            "<th style='border:1px solid #ccc; padding:4px;'>Margin</th>"
-            "<th style='border:1px solid #ccc; padding:4px;'>Elo</th>"
-            "<th style='border:1px solid #ccc; padding:4px;'>Model %</th>"
-            "<th style='border:1px solid #ccc; padding:4px;'>Implied %</th>"
-            "<th style='border:1px solid #ccc; padding:4px;'>Edge %</th>"
-            "<th style='border:1px solid #ccc; padding:4px;'>EV ($)</th>"
-            "<th style='border:1px solid #ccc; padding:4px;'>Signal</th>"
-            "<th style='border:1px solid #ccc; padding:4px;'>Score</th>"
-            "</tr>"
-        )
-
-        td = "border:1px solid #ccc; padding:4px;"
-        for _, row in top_games.iterrows():
-            matchup = f"{row['away_team']} @ {row['home_team']}"
-            side = str(row["side"]).upper()
-            bet_label = f"{row['team']} ({side})"
-            odds_str = _fmt_american(row.get("american_odds", ""))
-            signal = str(row.get("signal", ""))
-            ev_amount = float(row.get("ev_amount", 0.0))
-            sport = row.get("sport", "NHL")
-
-            xgb_s = row.get("p_xgb_str", "")
-            mar_s = row.get("p_margin_str", "")
-            elo_s = row.get("p_elo_str", "")
-
-            is_winner = bool(row.get("model_winner", False))
-            eligible = bool(row.get("eligible_order", False))
-            is_no_bet = bool(row.get("is_no_bet", False))
-            is_market_flip = (signal.strip().upper() == "MARKET FLIP")
-
-            # ✅ winner는 row 배경으로 표시 (green fill)
-            # 텍스트 색은 no_bet / market_flip만 유지
-            if is_no_bet:
-                style = "color:#cc0000;"
-            elif is_market_flip:
-                style = "color:#0066cc; font-weight:bold;"
-            else:
-                style = ""
-
-            score = int(row.get("score", 0))
-            tr_cls = "winner" if is_winner else ""
-            html_parts.append(
-                f"<tr class='{tr_cls}'>"
-                f"<td style='{td} text-align:center; {style}'>{int(row['Rank'])}</td>"
-                f"<td style='{td} {style}'>{sport}</td>"
-                f"<td style='{td} {style}'>{matchup}</td>"
-                f"<td style='{td} {style}'>{bet_label}</td>"
-                f"<td style='{td} {style}'>{row.get('bookmaker','')}</td>"
-                f"<td style='{td} text-align:right; {style}'>{odds_str}</td>"
-                f"<td style='{td} text-align:right; {style}'>{xgb_s}</td>"
-                f"<td style='{td} text-align:right; {style}'>{mar_s}</td>"
-                f"<td style='{td} text-align:right; {style}'>{elo_s}</td>"
-                f"<td style='{td} text-align:right; {style}'>{float(row['model_p_pct']):.2f}</td>"
-                f"<td style='{td} text-align:right; {style}'>{float(row['implied_p_pct']):.2f}</td>"
-                f"<td style='{td} text-align:right; {style}'>{float(row['edge_pct']):.2f}</td>"
-                f"<td style='{td} text-align:right; {style}'>{ev_amount:+.2f}</td>"
-                f"<td style='{td} text-align:center; {style}'>{signal}</td>"
-                f"<td style='{td} text-align:center;' class='scorecell'>{score}</td>"
-                "</tr>"
-            )
-        html_parts.append("</table>")
-
-    
-
-    html_parts.append(
-        "<div style='text-align:center; color:#888888; font-size:12px; margin-top:30px;'>"
-        "Sent automatically by QuantLee Bot 🤖"
-        "</div>"
-    )
-    html_parts.append("</body></html>")
-    html_body = "\n".join(html_parts)
-
-    # ==============================
-    # 4) Send email
-    # ==============================
-    msg = MIMEMultipart("alternative")
-    today_str = datetime.now().strftime("%m-%d-%Y")
-    msg["Subject"] = Header(f"NHL Quant Bot – Daily Report, {today_str}", "utf-8")  # ✅ 변경
-    msg["From"] = EMAIL_USER
-    msg["To"] = EMAIL_TO
-
-    msg.attach(MIMEText(plain_body, "plain", "utf-8"))
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
-
-    with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT) as server:
-        server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASSWORD)
-        server.send_message(msg)
-
-===================
-
-# nhl_quant_main.py
-
-from __future__ import annotations
-
-import pandas as pd
-import numpy as np
-
-from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
-
-from nhl_api_client import NHLDataClient
-from nhl_feature_engineering import build_today_dataset
-from nhl_quant_model import NHLQuantModel
-from nhl_goal_diff_model import NHLGoalDiffModel
-from odds_client import OddsAPIClient
-
-from nhl_edge import add_edge_from_odds, filter_bets
-from nhl_performance import update_bet_log_and_summary
-from nhl_strategy_tuning import tune_strategy_from_log
-from email_management import send_nhl_daily_report
-
-try:
-    from nhl_injury_lineup import attach_lineup_features, adjust_prob_with_lineup
-    HAS_LINEUP = True
-except ModuleNotFoundError:
-    HAS_LINEUP = False
-    attach_lineup_features = None
-    adjust_prob_with_lineup = None
-    print("[NHL MAIN] nhl_injury_lineup not found -> lineup/injury adjustments disabled.")
-
-
-
-
-
-# -----------------------------
-# Ensemble (optional but recommended)
-# -----------------------------
-def _add_ensemble_prob(scored_games: pd.DataFrame) -> pd.DataFrame:
-    """
-    NHL 버전 앙상블:
-      - XGB prob (p_home_win_adj 있으면 우선)
-      - goal diff model -> p_home_win_from_margin(=from_goal_diff) 있으면 섞기
-      - Elo 컬럼(diff_elo_like) 있으면 섞기
-    최종은 p_home_win에 덮어쓰기
-    """
-    df = scored_games.copy()
-
-    # 1) XGB
-    if "p_home_win_adj" in df.columns:
-        p_xgb = df["p_home_win_adj"].astype(float)
-    else:
-        p_xgb = df["p_home_win"].astype(float)
-
-    # 2) goal diff 기반 prob
-    if "p_home_win_from_margin" in df.columns:
-        p_gd = df["p_home_win_from_margin"].astype(float)
-    elif "p_home_win_from_goal_diff" in df.columns:
-        p_gd = df["p_home_win_from_goal_diff"].astype(float)
-    else:
-        p_gd = p_xgb
-
-    # 3) Elo
-    if "diff_elo_like" in df.columns:
-        diff_elo = df["diff_elo_like"].astype(float)
-        p_elo = 1.0 / (1.0 + 10.0 ** (-diff_elo / 400.0))
-    else:
-        p_elo = p_xgb
-
-    # weights (초기값)
-    w_xgb = 0.55
-    w_gd = 0.30
-    w_elo = 0.15
-    total = w_xgb + w_gd + w_elo
-    w_xgb, w_gd, w_elo = w_xgb / total, w_gd / total, w_elo / total
-
-    df["p_home_win_xgb"] = p_xgb
-    df["p_home_win_elo"] = p_elo
-    df["p_home_win_gd"] = p_gd
-
-    p_ens = w_xgb * p_xgb + w_gd * p_gd + w_elo * p_elo
-    p_ens = np.clip(p_ens, 0.01, 0.99)
-
-    df["p_home_win_ensemble"] = p_ens
-    df["p_home_win"] = df["p_home_win_ensemble"]
-
-    # downstream이 p_home_win_adj를 쓰는 경우도 있으니 덮어쓰기
-    if "p_home_win_adj" in df.columns:
-        df["p_home_win_adj"] = df["p_home_win"]
-
-    return df
-
-
-def _pick_datetime_col(df: pd.DataFrame) -> str | None:
-    # ✅ slate_date 계산용: "시간이 있는" 컬럼만 허용
-    preferred = [
-        "start_time_utc",
-        "start_time",
-        "commence_time",
-        "scheduled",
-        "game_datetime",
-        "datetime",
-    ]
-    for c in preferred:
-        if c in df.columns:
-            return c
-    return None
-
-
-def _filter_games_by_pt_slate_date(sched_df: pd.DataFrame, slate_pt_date: date, tz_pt: ZoneInfo) -> pd.DataFrame:
-    df = sched_df.copy()
-    time_col = _pick_datetime_col(df)
-    if time_col is None:
-        raise ValueError("[NHL MAIN] Schedule missing datetime column.")
-
-    df["_dt_utc"] = pd.to_datetime(df[time_col], utc=True, errors="coerce")
-    df["slate_date"] = df["_dt_utc"].dt.tz_convert(tz_pt).dt.date
-
-    out = df[df["slate_date"] == slate_pt_date].copy()
-    out.drop(columns=["_dt_utc"], inplace=True, errors="ignore")
-    return out
-
-
-def _filter_odds_by_pt_slate_date(odds_df_all: pd.DataFrame, slate_pt_date: date, tz_pt: ZoneInfo) -> pd.DataFrame:
-    if odds_df_all is None or odds_df_all.empty:
-        return pd.DataFrame()
-
-    df = odds_df_all.copy()
-    time_col = None
-    for c in ["start_time", "commence_time", "date"]:
-        if c in df.columns:
-            time_col = c
-            break
-    if time_col is None:
-        return pd.DataFrame()
-
-    df["_dt_utc"] = pd.to_datetime(df[time_col], utc=True, errors="coerce")
-    df["_pt_date"] = df["_dt_utc"].dt.tz_convert(tz_pt).dt.date
-
-    out = df[df["_pt_date"] == slate_pt_date].copy()
-    out["date"] = slate_pt_date
-    out.drop(columns=["_dt_utc", "_pt_date"], inplace=True, errors="ignore")
-    return out
-
-def _log_lineup_summary(df: pd.DataFrame, top_n: int = 50):
-    if df is None or df.empty:
-        return
-
-    need = [
-        "game_id","home_team_abbr","away_team_abbr",
-        "p_home_win","p_home_win_adj",
-        "z_lineup_depth","z_star_penalty","z_goalie_penalty","z_lineup_total",
-        "goalie_proxy_name_home","goalie_proxy_name_away",
-        "missing_star_names_home","missing_star_names_away",
-        "out_names_preview_home","out_names_preview_away",
-        "goalie_out_flag_home","goalie_out_flag_away",
-    ]
-    cols = [c for c in need if c in df.columns]
-
-    print("[NHL LINEUP SUMMARY] per-game snapshot")
-    for _, r in df[cols].head(top_n).iterrows():
-        gid = int(r.get("game_id")) if pd.notna(r.get("game_id")) else -1
-        away = r.get("away_team_abbr") or r.get("away_team") or "AWAY"
-        home = r.get("home_team_abbr") or r.get("home_team") or "HOME"
-
-        p = float(r.get("p_home_win")) if pd.notna(r.get("p_home_win")) else float("nan")
-        pa = float(r.get("p_home_win_adj")) if pd.notna(r.get("p_home_win_adj")) else p
-
-        z_d = float(r.get("z_lineup_depth", 0.0) or 0.0)
-        z_s = float(r.get("z_star_penalty", 0.0) or 0.0)
-        z_g = float(r.get("z_goalie_penalty", 0.0) or 0.0)
-        z_t = float(r.get("z_lineup_total", 0.0) or 0.0)
-
-        g_home = r.get("goalie_proxy_name_home")
-        g_away = r.get("goalie_proxy_name_away")
-
-        so_home = r.get("missing_star_names_home")
-        so_away = r.get("missing_star_names_away")
-
-        def _safe_int_log(x, default=0):
-            v = pd.to_numeric(x, errors="coerce")
-            return int(v) if pd.notna(v) else int(default)
-
-        goh = _safe_int_log(r.get("goalie_out_flag_home", 0), 0)
-        goa = _safe_int_log(r.get("goalie_out_flag_away", 0), 0)
-
-        print(
-            f"[GAME {gid}] {away}@{home} | p={p:.3f} adj={pa:.3f} | "
-            f"z(d/s/g/t)=({z_d:+.3f}/{z_s:+.3f}/{z_g:+.3f}/{z_t:+.3f}) | "
-            f"G(proxy) A={g_away} H={g_home} (out A/H={goa}/{goh}) | "
-            f"StarOut A={so_away} H={so_home}"
-        )
-
-
-def main():
-    tz_pt = ZoneInfo("America/Los_Angeles")
-    today = datetime.now(tz_pt).date()
-    print(f"[NHL MAIN] Running (PT) for date={today}")
-
-    client = NHLDataClient()
-
+name: NHL Quant-Bot
+
+on:
+  # schedule:
+    # =========================  
+    # ✅ Daily run @ 8:00 PM PT (PST)
+    # -------------------------
+    # 08:00 PT (PST, UTC-8) = 04:00 UTC
+    # - cron: "0 4 * * *"
+    # ========================= 
+      
+    # ✅ Annual retrain (Aug 1)
+    # -------------------------
+    # Aug is typically PDT (UTC-7): 06:00 PT = 13:00 UTC
+    # - cron: "0 13 1 8 *"
     # =========================
-    # (1) Past games (feature base)
-    # =========================
-    seasons = [today.year - 1]  # 운영용: 최근 1 시즌
-    raw_games = client.fetch_games_by_season(seasons)
-    if raw_games is None or raw_games.empty:
-        print("[NHL MAIN] No historical games fetched. Abort.")
-        return
-
-    # ✅ NHL past-games 날짜 표준화 (UTC->naive normalize)
-    time_col_hist = None
-    for c in ["start_time_utc", "start_time", "commence_time", "scheduled", "game_datetime", "datetime", "date", "game_date"]:
-        if c in raw_games.columns:
-            time_col_hist = c
-            break
-    if time_col_hist is None:
-        raise ValueError("[NHL MAIN] raw_games missing datetime column.")
-
-    raw_games["date"] = (
-        pd.to_datetime(raw_games[time_col_hist], utc=True, errors="coerce")
-          .dt.tz_convert(None)
-          .dt.normalize()
-    )
-
-    raw_games_past = raw_games[raw_games["date"] < pd.Timestamp(today)].copy()
-    if raw_games_past.empty:
-        print("[NHL MAIN] No past games before today. Abort.")
-        return
-
-    # =========================
-    # ✅ SLATE 선택 (NBA MAIN 방식 그대로)
-    # - schedule에서 PT '오늘' 경기만
-    # - odds도 PT '오늘'로만 필터
-    # - 마지막에 odds game_id로 slate 확정
-    # =========================
-
-    # (A) schedule 먼저 확정 (UTC/PT 날짜 경계 때문에 ±3일)
-    start_date = today - timedelta(days=3)
-    end_date   = today + timedelta(days=3)
-
-    sched_df = client.fetch_games_by_date_range_df(
-        start_date=start_date,
-        end_date=end_date,
-        per_page=200,
-    )
-    if sched_df is None or sched_df.empty:
-        print(f"[NHL MAIN] No scheduled games for {start_date}~{end_date}. Abort.")
-        return
-
-    sched_df = sched_df.copy()
-
-    # ✅ schedule에서 실제 시작시간 컬럼 찾기 (NHL은 start_time_utc가 있는 경우가 많음)
-    time_col_sched = _pick_datetime_col(sched_df)
-    if time_col_sched is None:
-        raise ValueError("[NHL MAIN] Schedule missing datetime-with-time column (start_time_utc/start_time/etc).")
-
-    print("[SCHED DEBUG] time_col picked:", time_col_sched)
-    print("[SCHED DEBUG] columns:", list(sched_df.columns))
-    print("[SCHED DEBUG] time sample:", sched_df[time_col_sched].head(3).tolist() if time_col_sched else None)
-
-    if time_col_sched is None:
-        print("[NHL MAIN] Schedule missing datetime column. Abort.")
-        return
-
-    # ✅ 핵심: schedule 시간을 UTC로 파싱 → PT로 변환 → slate_date
-    sched_df["_dt_utc"] = pd.to_datetime(sched_df[time_col_sched], utc=True, errors="coerce")
-    sched_df["slate_date"] = sched_df["_dt_utc"].dt.tz_convert(tz_pt).dt.date
-
-    print("[SCHED DEBUG] slate_date counts (top):")
-    print(sched_df["slate_date"].value_counts().head(5))
-
-    today_games = sched_df[sched_df["slate_date"] == today].copy()
-    if today_games.empty:
-        print(f"[NHL MAIN] No games found for PT date={today}. Abort.")
-        return
-
-    # (B) odds는 "PT 오늘 하루"만 정확히 필터
-    odds_client = OddsAPIClient()
-    odds_df_all = odds_client.fetch_nhl_moneyline_odds(regions="us", attach_game_id=True)
-
-    if odds_df_all is None or odds_df_all.empty:
-        print("[NHL MAIN] No odds from API. Abort.")
-        return
-
-    odds_df_all = odds_df_all.copy()
-
-    time_col_odds = None
-    for c in ["start_time", "commence_time"]:  # ✅ date 제외
-        if c in odds_df_all.columns:
-            time_col_odds = c
-            break
-    if time_col_odds is None:
-        raise ValueError("[NHL MAIN] Odds missing start_time/commence_time (datetime-with-time).")
-
-    odds_df_all["_dt_utc"] = pd.to_datetime(odds_df_all[time_col_odds], utc=True, errors="coerce")
-    odds_df_all["_pt_date"] = odds_df_all["_dt_utc"].dt.tz_convert(tz_pt).dt.date
-
-    odds_df = odds_df_all[odds_df_all["_pt_date"] == today].copy()
-    odds_df["date"] = today
-    odds_df.drop(columns=["_dt_utc", "_pt_date"], inplace=True, errors="ignore")
-
-    if odds_df.empty:
-        print("[NHL MAIN] Odds exist but none matched PT today. Abort.")
-        return
-
-    # ✅✅✅ 핵심: odds에 붙은 game_id로 slate 최종 확정 (NBA와 동일)
-    if "game_id" in odds_df.columns:
-        odds_game_ids = odds_df["game_id"].dropna().astype(int).unique().tolist()
-
-        # 오늘경기(today_games)로 확정하지 말고, odds game_id로 확정
-        today_games = today_games[today_games["game_id"].astype(int).isin(odds_game_ids)].copy()
-
-        print(f"[SLATE FIX][NHL] odds_game_ids={len(odds_game_ids)} | today_games(after odds filter)={len(today_games)}")
-
-        if today_games.empty:
-            print("[SLATE FIX][NHL] No schedule rows matched odds game_id. Expand schedule date range.")
-            return
-    else:
-        print("[SLATE FIX][NHL] Odds missing game_id. Abort.")
-        return
-
-    print(f"[NHL MAIN] Final slate(PT)={today} | games={today_games['game_id'].nunique()} | odds_rows={len(odds_df)}")
-
-    # =========================
-    # (4) Build today features
-    # =========================
-    today_df, feature_cols = build_today_dataset(
-        raw_games_past,
-        today_games,
-        today,
-    )
-    
-    if today_df is None or today_df.empty:
-        print("[NHL MAIN] No valid feature rows for today. Abort.")
-        return
-    
-    # =========================================================
-    # DEBUG: XGB input feature sanity check
-    # =========================================================
-    print("[DEBUG][XGB INPUT] n_features =", len(feature_cols))
-
-    lineup_feats = [c for c in feature_cols if c.startswith("lineup_") or c.startswith("diff_lineup_")]
-    print("[DEBUG][XGB INPUT] lineup features in feature_cols:", lineup_feats)
-
-    lineup_cols_df = [c for c in today_df.columns if c.startswith("lineup_") or c.startswith("diff_lineup_")]
-    print("[DEBUG][XGB INPUT] lineup columns in today_df:", lineup_cols_df)
-
-    # optional: 실제 모델에 들어가는 X 행 shape
-    print("[DEBUG][XGB INPUT] today_df shape:", today_df.shape)
-
-
-
-
-
-
-    # =========================
-    # (5) Predict
-    # =========================
-    win_model = NHLQuantModel.load_from_disk()
-    scored_games = win_model.predict_proba(today_df)
-
-    # ✅ schedule(today_games)에서 팀 메타를 scored_games에 강제 주입
-    need = ["game_id", "season", "home_team_id", "away_team_id", "home_team", "away_team", "home_team_abbr", "away_team_abbr"]
-    have = [c for c in need if c in today_games.columns]
-
-    # (A) scored_games에 같은 이름 컬럼이 이미 있으면 suffix 문제 생김 → 먼저 제거
-    dup_cols = [c for c in need if c != "game_id" and c in scored_games.columns]
-    if dup_cols:
-        scored_games = scored_games.drop(columns=dup_cols, errors="ignore")
-
-    # (B) merge
-    if have:
-        meta = today_games[have].drop_duplicates(subset=["game_id"]).copy()
-        scored_games["game_id"] = pd.to_numeric(scored_games["game_id"], errors="coerce")
-        meta["game_id"] = pd.to_numeric(meta["game_id"], errors="coerce")
-        scored_games = scored_games.merge(meta, on="game_id", how="left")
-
-    # (C) 최소 필수 컬럼 보장 (edge/lineup이 필요)
-    if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
-        # suffix가 생긴 경우까지 커버 (혹시 남아있다면)
-        for side in ["home_team", "away_team"]:
-            if side not in scored_games.columns:
-                if f"{side}_y" in scored_games.columns:
-                    scored_games[side] = scored_games[f"{side}_y"]
-                elif f"{side}_x" in scored_games.columns:
-                    scored_games[side] = scored_games[f"{side}_x"]
-
-    if "home_team" not in scored_games.columns or "away_team" not in scored_games.columns:
-        raise RuntimeError("[NHL MAIN] scored_games missing home_team/away_team after schedule meta join.")
-    
-    
-
-
-
-
-
-    # ✅ downstream merge 안정화: 오늘 날짜로 고정
-    scored_games["date"] = today
-
-    # ✅ (5.1) Lineup/Injury features + prob adjust
-    if HAS_LINEUP:
-        try:
-            scored_games = attach_lineup_features(scored_games, today=today)
-            scored_games = adjust_prob_with_lineup(scored_games)
-
-            # ✅ NEW: per-game lineup summary to GitHub Actions logs
-            _log_lineup_summary(scored_games)
-
-        except Exception as e:
-            print(f"[NHL MAIN] lineup adjust skipped: {e}")
-
-    # ✅ lineup adjust 후에도 날짜 다시 고정 (안전)
-    scored_games["date"] = today
-
-    # (5.2) GoalDiff 모델 merge
-    try:
-        gd_model = NHLGoalDiffModel.load_from_disk()
-        gd_df = gd_model.predict_goal_diff(today_df)
-
-        merge_cols = ["game_id", "goal_diff_pred", "p_home_win_from_goal_diff", "p_home_win_from_margin"]
-        merge_cols = [c for c in merge_cols if c in gd_df.columns]
-
-        if merge_cols:
-            scored_games = scored_games.merge(gd_df[merge_cols], on="game_id", how="left")
-    except Exception as e:
-        print(f"[NHL MAIN] GoalDiff model failed or missing: {e}")
-
-    # (5.3) Ensemble
-    try:
-        scored_games = _add_ensemble_prob(scored_games)
-    except Exception as e:
-        print(f"[NHL MAIN] Ensemble failed: {e}")
-
-    # =========================
-    # (6) Edge + filter
-    # =========================
-    edge_df = add_edge_from_odds(
-        scored_games=scored_games,
-        odds_df=odds_df,
-        preferred_bookmaker=None,
-        market_blend_alpha=0.7,
-        odds_history_df=None,
-    )
-
-    if edge_df is None or edge_df.empty:
-        print("[NHL MAIN] Could not match any odds to games. Abort.")
-        return
-
-    reco_df = filter_bets(
-        edge_df,
-        min_edge=0.03,
-        use_bucket_rules=True,
-        use_strategy_config=True,
-    )
-
-    # =========================
-    # (7) Performance log + tune
-    # =========================
-    try:
-        _, perf_summary = update_bet_log_and_summary(
-            reco_df=reco_df,
-            raw_games_past=raw_games_past,
-            today=today,              # ✅ 여기 today
-            stake_per_bet=100.0,
-        )
-    except Exception as e:
-        print(f"[NHL MAIN] performance update failed: {e}")
-        perf_summary = None
-
-    try:
-        tune_strategy_from_log()
-    except Exception as e:
-        print(f"[NHL MAIN] strategy tuning failed: {e}")
-
-    # =========================
-    # (8) Email
-    # =========================
-    send_nhl_daily_report(
-        reco_df=reco_df,
-        full_df=edge_df,
-        perf_summary=perf_summary,
-    )
-
-
-if __name__ == "__main__":
-    main()
-
-
-===================
-
-내가 준 코드 어딘가에, 우리가 방금 넣은것보다 더 우선되는 로직이 분명히 있어. 어떤 기준을 두고 그 기준에 만족해야만 색이 칠해지는. 
-지금 아직도 모든 매치마다 한팀은 색깔을 받아야 하는데 그게 안된다고. 
+ 
+    # ======================================================
+    # Hourly options (PT) — uncomment ONLY the cron line you want
+    # Note: GitHub Actions cron is UTC
+    # ------------------------------------------------------
+    # ---- PST (UTC-8) : 09:00–20:00 PT => 17:00–04:00 UTC ----
+    # 9 AM  (PST) = 17:00 UTC
+    # - cron: "0 17 * * *"
+
+    # 10 AM (PST) = 18:00 UTC
+    # - cron: "0 18 * * *"
+
+    # 11 AM (PST) = 19:00 UTC
+    # - cron: "0 19 * * *"
+
+    # 12 PM (PST) = 20:00 UTC
+    # - cron: "0 20 * * *"
+
+    # 1 PM  (PST) = 21:00 UTC
+    # - cron: "0 21 * * *"
+
+    # 2 PM  (PST) = 22:00 UTC
+    # - cron: "0 22 * * *"
+
+    # 3 PM  (PST) = 23:00 UTC
+    # - cron: "0 23 * * *"
+
+    # 4 PM  (PST) = 00:00 UTC (next day)
+    # - cron: "0 0 * * *"
+
+    # 5 PM  (PST) = 01:00 UTC (next day)
+    # - cron: "0 1 * * *"
+
+    # 6 PM  (PST) = 02:00 UTC (next day)
+    # - cron: "0 2 * * *"
+
+    # 7 PM  (PST) = 03:00 UTC (next day)
+    # - cron: "0 3 * * *"
+
+    # 8 PM  (PST) = 04:00 UTC (next day)
+    # - cron: "0 4 * * *"
+    # ======================================================
+
+  workflow_dispatch:
+    inputs:
+      run_mode:
+        description: "Select which script to run"
+        required: true
+        default: "normal"
+        type: choice
+        options:
+          - normal
+          - next_day
+
+permissions:
+  contents: write
+
+jobs:
+  nhl-quant:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Debug schedule identity
+        run: |
+          echo "================ DEBUG ================="
+          echo "workflow_ref = ${{ github.workflow_ref }}"
+          echo "workflow     = ${{ github.workflow }}"
+          echo "sha          = ${{ github.sha }}"
+          echo "event_name   = ${{ github.event_name }}"
+          echo "schedule     = ${{ github.event.schedule }}"
+          echo "run_id       = ${{ github.run_id }}"
+          echo "run_number   = ${{ github.run_number }}"
+          echo "----------------------------------------"
+          echo "UTC time:"
+          date -u
+          echo "LA time:"
+          TZ=America/Los_Angeles date
+          echo "========================================"
+          
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography
+          pip install -r requirements.txt
+
+      # ✅ Ensure folders exist + keep them visible in GitHub (empty folder issue)
+      - name: Ensure data/models dirs exist
+        run: |
+          mkdir -p data models
+          test -f models/.gitkeep || echo "" > models/.gitkeep
+          test -f data/.gitkeep || echo "" > data/.gitkeep
+
+      # ✅ Detect annual retrain run (Aug 1 cron)
+      - name: Detect annual retrain run
+        id: retrain_flag
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "0 13 1 8 *" ]; then
+            echo "is_retrain=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_retrain=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ✅ Detect next-day script usage:
+      # - manual run: depends on inputs.run_mode
+      - name: Detect next-day run (schedule or manual)
+        id: nextday_flag
+        run: |
+          # Manual run: use input selection
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.run_mode }}" = "next_day" ]; then
+              echo "use_nextday=true" >> $GITHUB_OUTPUT
+            else
+              echo "use_nextday=false" >> $GITHUB_OUTPUT
+            fi
+            exit 0
+          fi
+
+          # Scheduled run: 8:00 PM PT (PST) = 04:00 UTC => "0 4 * * *"
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "0 4 * * *" ]; then
+            echo "use_nextday=true" >> $GITHUB_OUTPUT
+          else
+            echo "use_nextday=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ✅ Check if PKLs exist (MUST match config.py paths)
+      - name: Check if model PKLs exist
+        id: model_check
+        run: |
+          WIN_PKL="models/nhl_xgb_win.pkl"
+          MARGIN_PKL="models/nhl_xgb_margin.pkl"
+
+          if [ -f "$WIN_PKL" ] && [ -f "$MARGIN_PKL" ]; then
+            echo "need_train=false" >> $GITHUB_OUTPUT
+            echo "PKLs found. Will reuse."
+          else
+            echo "need_train=true" >> $GITHUB_OUTPUT
+            echo "PKLs missing. Will train and commit."
+          fi
+
+      # ✅ Train if missing OR annual retrain day
+      - name: Train NHL Model (only when missing or annual retrain)
+        if: steps.model_check.outputs.need_train == 'true' || steps.retrain_flag.outputs.is_retrain == 'true'
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+          BALLDONTLIE_BASE_URL: ${{ secrets.BALLDONTLIE_BASE_URL }}
+        run: |
+          python nhl_train_quant.py
+
+      # ✅ Commit & push PKLs (+ .gitkeep) if training ran
+      - name: Commit & push updated PKLs (and keep files)
+        if: steps.model_check.outputs.need_train == 'true' || steps.retrain_flag.outputs.is_retrain == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add models/nhl_xgb_win.pkl models/nhl_xgb_margin.pkl models/.gitkeep data/.gitkeep || true
+          git status
+
+          git diff --cached --quiet && echo "No model changes to commit." && exit 0
+
+          git commit -m "Update NHL model PKLs (auto)"
+          git push
+
+      # ✅ Run bot (daily + retrain day)
+      - name: Run NHL Quant-Bot
+        env:
+          EMAIL_HOST: ${{ secrets.EMAIL_HOST }}
+          EMAIL_PORT: ${{ secrets.EMAIL_PORT }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+          BALLDONTLIE_BASE_URL: ${{ secrets.BALLDONTLIE_BASE_URL }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          ODDS_API_BASE_URL: ${{ secrets.ODDS_API_BASE_URL }}
+        run: |
+          if [ "${{ steps.nextday_flag.outputs.use_nextday }}" = "true" ]; then
+            echo "[RUN] Using next-day script: nhl_quant_main_next_day.py"
+            python nhl_quant_main_next_day.py
+          else
+            echo "[RUN] Using normal script: nhl_quant_main.py"
+            python nhl_quant_main.py
+          fi
+
+
+======
+
+스케줄을 아주 간소화 하고 싶어. 
+8:49 PM 에는 다음날꺼 (여름기준)
+6:13 AM  에는 오늘꺼 (여름기준)
+
+딱 이렇게 두개만. 
+
+겨울꺼는 주석달아주고. 
