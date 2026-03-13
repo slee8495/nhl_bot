@@ -1,141 +1,19 @@
 
-on:
-  schedule:
-    # WINTER 
-    # 8:49 PM PT (PST) = 04:49 UTC next day
-    # - cron: "49 4 * * *"
-
-    # 6:13 AM PT (PST) = 14:13 UTC
-    # - cron: "13 14 * * *"
-
-    # SUMMER
-    # --------------------------------------------
-    # 8:49 PM PT (PDT) = 03:49 UTC next day
-    - cron: "49 3 * * *"
-
-    # 6:13 AM PT (PDT) = 13:13 UTC
-    - cron: "13 13 * * *"
-
-
-
-  workflow_dispatch:
-    inputs:
-      run_mode:
-        description: "Select which script to run"
-        required: true
-        default: "normal"
-        type: choice
-        options:
-          - normal
-          - next_day
-
---
-
-      - name: Detect next-day run (schedule or manual)
-        id: nextday_flag
-        run: |
-          # Manual run: use input selection
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            if [ "${{ inputs.run_mode }}" = "next_day" ]; then
-              echo "use_nextday=true" >> $GITHUB_OUTPUT
-            else
-              echo "use_nextday=false" >> $GITHUB_OUTPUT
-            fi
-            exit 0
-          fi
-
-          # Scheduled run: 8:00 PM PT (PST) = 04:00 UTC => "0 4 * * *"
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "0 4 * * *" ]; then
-            echo "use_nextday=true" >> $GITHUB_OUTPUT
-          else
-            echo "use_nextday=false" >> $GITHUB_OUTPUT
-          fi
-
---
-
-      - name: Detect next-day run (schedule or manual)
-        id: nextday_flag
-        run: |
-          # Manual run: use input selection
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            if [ "${{ inputs.run_mode }}" = "next_day" ]; then
-              echo "use_nextday=true" >> $GITHUB_OUTPUT
-            else
-              echo "use_nextday=false" >> $GITHUB_OUTPUT
-            fi
-            exit 0
-          fi
-
-          # Scheduled run:
-          # SUMMER (PDT): 8:49 PM PT = 03:49 UTC next day => "49 3 * * *"
-          # WINTER (PST): 8:49 PM PT = 04:49 UTC next day => "49 4 * * *"  [reference only]
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "49 3 * * *" ]; then
-            echo "use_nextday=true" >> $GITHUB_OUTPUT
-          else
-            echo "use_nextday=false" >> $GITHUB_OUTPUT
-          fi
-
---
 
 
 name: NHL Quant-Bot
 
 on:
-  # schedule:
-    # =========================  
-    # ✅ Daily run @ 8:00 PM PT (PST)
-    # -------------------------
-    # 08:00 PT (PST, UTC-8) = 04:00 UTC
-    # - cron: "0 4 * * *"
-    # ========================= 
-      
-    # ✅ Annual retrain (Aug 1)
-    # -------------------------
-    # Aug is typically PDT (UTC-7): 06:00 PT = 13:00 UTC
-    # - cron: "0 13 1 8 *"
-    # =========================
- 
-    # ======================================================
-    # Hourly options (PT) — uncomment ONLY the cron line you want
-    # Note: GitHub Actions cron is UTC
-    # ------------------------------------------------------
-    # ---- PST (UTC-8) : 09:00–20:00 PT => 17:00–04:00 UTC ----
-    # 9 AM  (PST) = 17:00 UTC
-    # - cron: "0 17 * * *"
+  schedule:
+    # WINTER 
+    # - cron: "49 4 * * *"    # 8:49 PM PT (PST) = 04:49 UTC next day
+    # - cron: "13 14 * * *"   # 6:13 AM PT (PST) = 14:13 UTC
 
-    # 10 AM (PST) = 18:00 UTC
-    # - cron: "0 18 * * *"
+    # SUMMER
+    - cron: "49 3 * * *"   # 8:49 PM PT (PDT) = 03:49 UTC next day
+    - cron: "13 13 * * *"  # 6:13 AM PT (PDT) = 13:13 UTC
 
-    # 11 AM (PST) = 19:00 UTC
-    # - cron: "0 19 * * *"
 
-    # 12 PM (PST) = 20:00 UTC
-    # - cron: "0 20 * * *"
-
-    # 1 PM  (PST) = 21:00 UTC
-    # - cron: "0 21 * * *"
-
-    # 2 PM  (PST) = 22:00 UTC
-    # - cron: "0 22 * * *"
-
-    # 3 PM  (PST) = 23:00 UTC
-    # - cron: "0 23 * * *"
-
-    # 4 PM  (PST) = 00:00 UTC (next day)
-    # - cron: "0 0 * * *"
-
-    # 5 PM  (PST) = 01:00 UTC (next day)
-    # - cron: "0 1 * * *"
-
-    # 6 PM  (PST) = 02:00 UTC (next day)
-    # - cron: "0 2 * * *"
-
-    # 7 PM  (PST) = 03:00 UTC (next day)
-    # - cron: "0 3 * * *"
-
-    # 8 PM  (PST) = 04:00 UTC (next day)
-    # - cron: "0 4 * * *"
-    # ======================================================
 
   workflow_dispatch:
     inputs:
@@ -228,8 +106,10 @@ jobs:
             exit 0
           fi
 
-          # Scheduled run: 8:00 PM PT (PST) = 04:00 UTC => "0 4 * * *"
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "0 4 * * *" ]; then
+          # Scheduled run:
+          # SUMMER (PDT): 8:49 PM PT = 03:49 UTC next day => "49 3 * * *"
+          # WINTER (PST): 8:49 PM PT = 04:49 UTC next day => "49 4 * * *"  [reference only]
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "49 3 * * *" ]; then
             echo "use_nextday=true" >> $GITHUB_OUTPUT
           else
             echo "use_nextday=false" >> $GITHUB_OUTPUT
@@ -297,12 +177,6 @@ jobs:
           fi
 
 
-======
+===
 
-스케줄을 아주 간소화 하고 싶어. 
-8:49 PM 에는 다음날꺼 (여름기준)
-6:13 AM  에는 오늘꺼 (여름기준)
-
-딱 이렇게 두개만. 
-
-겨울꺼는 주석달아주고. 
+이거 깔끔하지? 
