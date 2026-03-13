@@ -1,8 +1,14 @@
 
 on:
   schedule:
-    # ============================================
-    # SUMMER ONLY (PDT, UTC-7)
+    # WINTER 
+    # 8:49 PM PT (PST) = 04:49 UTC next day
+    # - cron: "49 4 * * *"
+
+    # 6:13 AM PT (PST) = 14:13 UTC
+    # - cron: "13 14 * * *"
+
+    # SUMMER
     # --------------------------------------------
     # 8:49 PM PT (PDT) = 03:49 UTC next day
     - cron: "49 3 * * *"
@@ -10,14 +16,7 @@ on:
     # 6:13 AM PT (PDT) = 13:13 UTC
     - cron: "13 13 * * *"
 
-    # --------------------------------------------
-    # WINTER REFERENCE ONLY (PST, UTC-8)
-    # 8:49 PM PT (PST) = 04:49 UTC next day
-    # - cron: "49 4 * * *"
 
-    # 6:13 AM PT (PST) = 14:13 UTC
-    # - cron: "13 14 * * *"
-    # ============================================
 
   workflow_dispatch:
     inputs:
