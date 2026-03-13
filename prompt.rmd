@@ -1,4 +1,83 @@
 
+on:
+  schedule:
+    # ============================================
+    # SUMMER ONLY (PDT, UTC-7)
+    # --------------------------------------------
+    # 8:49 PM PT (PDT) = 03:49 UTC next day
+    - cron: "49 3 * * *"
+
+    # 6:13 AM PT (PDT) = 13:13 UTC
+    - cron: "13 13 * * *"
+
+    # --------------------------------------------
+    # WINTER REFERENCE ONLY (PST, UTC-8)
+    # 8:49 PM PT (PST) = 04:49 UTC next day
+    # - cron: "49 4 * * *"
+
+    # 6:13 AM PT (PST) = 14:13 UTC
+    # - cron: "13 14 * * *"
+    # ============================================
+
+  workflow_dispatch:
+    inputs:
+      run_mode:
+        description: "Select which script to run"
+        required: true
+        default: "normal"
+        type: choice
+        options:
+          - normal
+          - next_day
+
+--
+
+      - name: Detect next-day run (schedule or manual)
+        id: nextday_flag
+        run: |
+          # Manual run: use input selection
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.run_mode }}" = "next_day" ]; then
+              echo "use_nextday=true" >> $GITHUB_OUTPUT
+            else
+              echo "use_nextday=false" >> $GITHUB_OUTPUT
+            fi
+            exit 0
+          fi
+
+          # Scheduled run: 8:00 PM PT (PST) = 04:00 UTC => "0 4 * * *"
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "0 4 * * *" ]; then
+            echo "use_nextday=true" >> $GITHUB_OUTPUT
+          else
+            echo "use_nextday=false" >> $GITHUB_OUTPUT
+          fi
+
+--
+
+      - name: Detect next-day run (schedule or manual)
+        id: nextday_flag
+        run: |
+          # Manual run: use input selection
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.run_mode }}" = "next_day" ]; then
+              echo "use_nextday=true" >> $GITHUB_OUTPUT
+            else
+              echo "use_nextday=false" >> $GITHUB_OUTPUT
+            fi
+            exit 0
+          fi
+
+          # Scheduled run:
+          # SUMMER (PDT): 8:49 PM PT = 03:49 UTC next day => "49 3 * * *"
+          # WINTER (PST): 8:49 PM PT = 04:49 UTC next day => "49 4 * * *"  [reference only]
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "49 3 * * *" ]; then
+            echo "use_nextday=true" >> $GITHUB_OUTPUT
+          else
+            echo "use_nextday=false" >> $GITHUB_OUTPUT
+          fi
+
+--
+
 
 name: NHL Quant-Bot
 
