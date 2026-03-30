@@ -7,8 +7,8 @@ on:
     # - cron: "13 14 * * *"   # 6:13 AM PT (PST) = 14:13 UTC
 
     # SUMMER
-    - cron: "49 3 * * *"   # 8:49 PM PT (PDT) = 03:49 UTC next day
-    - cron: "13 13 * * *"  # 6:13 AM PT (PDT) = 13:13 UTC
+    - cron: "53 3 * * *"   # 8:53 PM PT (PDT) = 03:49 UTC next day
+    - cron: "53 13 * * *"  # 6:53 AM PT (PDT) = 13:13 UTC
 
 
 
