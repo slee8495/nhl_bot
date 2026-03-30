@@ -3,12 +3,12 @@ name: NHL Quant-Bot
 on:
   schedule:
     # WINTER 
-    # - cron: "49 4 * * *"    # 8:49 PM PT (PST) = 04:49 UTC next day
-    # - cron: "13 14 * * *"   # 6:13 AM PT (PST) = 14:13 UTC
+    # - cron: "53 4 * * *"    # 8:53 PM PT (PST) 
+    # - cron: "17 14 * * *"   # 6:17 AM PT (PST) 
 
     # SUMMER
-    - cron: "53 3 * * *"   # 8:53 PM PT (PDT) = 03:49 UTC next day
-    - cron: "53 13 * * *"  # 6:53 AM PT (PDT) = 13:13 UTC
+    - cron: "53 3 * * *"   # 8:53 PM PT (PDT) 
+    - cron: "17 13 * * *"  # 6:17 AM PT (PDT) 
 
 
 
