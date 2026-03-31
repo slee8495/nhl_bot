@@ -104,9 +104,13 @@ jobs:
           fi
 
           # Scheduled run:
-          # SUMMER (PDT): 8:49 PM PT = 03:49 UTC next day => "49 3 * * *"
-          # WINTER (PST): 8:49 PM PT = 04:49 UTC next day => "49 4 * * *"  [reference only]
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "49 3 * * *" ]; then
+          # Auto detect using Los Angeles local time (DST safe)
+          HOUR_PT=$(TZ=America/Los_Angeles date +%H)
+
+          echo "Current PT hour = $HOUR_PT"
+
+          # Night run (20~23시) -> next_day
+          if [ "$HOUR_PT" -ge 20 ]; then
             echo "use_nextday=true" >> $GITHUB_OUTPUT
           else
             echo "use_nextday=false" >> $GITHUB_OUTPUT
