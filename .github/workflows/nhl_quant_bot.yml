@@ -1,178 +1,178 @@
-# name: NHL Quant-Bot
+name: NHL Quant-Bot
 
-# on:
-#   schedule:
-#     # WINTER 
-#     # - cron: "39 4 * * *"    # 8:39 PM PT (PST) 
-#     # - cron: "17 14 * * *"   # 6:17 AM PT (PST) 
+on:
+  schedule:
+    # WINTER 
+    # - cron: "39 4 * * *"    # 8:39 PM PT (PST) 
+    # - cron: "17 14 * * *"   # 6:17 AM PT (PST) 
 
-#     # SUMMER
-#     - cron: "39 3 * * *"   # 8:39 PM PT (PDT) 
-#     - cron: "17 13 * * *"  # 6:17 AM PT (PDT) 
+    # SUMMER
+    - cron: "39 3 * * *"   # 8:39 PM PT (PDT) 
+    - cron: "17 13 * * *"  # 6:17 AM PT (PDT) 
 
 
 
-#   workflow_dispatch:
-#     inputs:
-#       run_mode:
-#         description: "Select which script to run"
-#         required: true
-#         default: "normal"
-#         type: choice
-#         options:
-#           - normal
-#           - next_day
+  workflow_dispatch:
+    inputs:
+      run_mode:
+        description: "Select which script to run"
+        required: true
+        default: "normal"
+        type: choice
+        options:
+          - normal
+          - next_day
 
-# permissions:
-#   contents: write
+permissions:
+  contents: write
 
-# jobs:
-#   nhl-quant:
-#     runs-on: ubuntu-latest
+jobs:
+  nhl-quant:
+    runs-on: ubuntu-latest
 
-#     steps:
-#       - name: Checkout repo
-#         uses: actions/checkout@v4
-#         with:
-#           fetch-depth: 0
-#           persist-credentials: true
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
-#       - name: Debug schedule identity
-#         run: |
-#           echo "================ DEBUG ================="
-#           echo "workflow_ref = ${{ github.workflow_ref }}"
-#           echo "workflow     = ${{ github.workflow }}"
-#           echo "sha          = ${{ github.sha }}"
-#           echo "event_name   = ${{ github.event_name }}"
-#           echo "schedule     = ${{ github.event.schedule }}"
-#           echo "run_id       = ${{ github.run_id }}"
-#           echo "run_number   = ${{ github.run_number }}"
-#           echo "----------------------------------------"
-#           echo "UTC time:"
-#           date -u
-#           echo "LA time:"
-#           TZ=America/Los_Angeles date
-#           echo "========================================"
+      - name: Debug schedule identity
+        run: |
+          echo "================ DEBUG ================="
+          echo "workflow_ref = ${{ github.workflow_ref }}"
+          echo "workflow     = ${{ github.workflow }}"
+          echo "sha          = ${{ github.sha }}"
+          echo "event_name   = ${{ github.event_name }}"
+          echo "schedule     = ${{ github.event.schedule }}"
+          echo "run_id       = ${{ github.run_id }}"
+          echo "run_number   = ${{ github.run_number }}"
+          echo "----------------------------------------"
+          echo "UTC time:"
+          date -u
+          echo "LA time:"
+          TZ=America/Los_Angeles date
+          echo "========================================"
           
 
-#       - name: Set up Python
-#         uses: actions/setup-python@v5
-#         with:
-#           python-version: "3.11"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-#       - name: Install system deps
-#         run: |
-#           sudo apt-get update
-#           sudo apt-get install -y build-essential libssl-dev
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev
 
-#       - name: Install Python deps
-#         run: |
-#           python -m pip install --upgrade pip
-#           pip install cryptography
-#           pip install -r requirements.txt
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography
+          pip install -r requirements.txt
 
-#       # ✅ Ensure folders exist + keep them visible in GitHub (empty folder issue)
-#       - name: Ensure data/models dirs exist
-#         run: |
-#           mkdir -p data models
-#           test -f models/.gitkeep || echo "" > models/.gitkeep
-#           test -f data/.gitkeep || echo "" > data/.gitkeep
+      # ✅ Ensure folders exist + keep them visible in GitHub (empty folder issue)
+      - name: Ensure data/models dirs exist
+        run: |
+          mkdir -p data models
+          test -f models/.gitkeep || echo "" > models/.gitkeep
+          test -f data/.gitkeep || echo "" > data/.gitkeep
 
-#       # ✅ Detect annual retrain run (Aug 1 cron)
-#       - name: Detect annual retrain run
-#         id: retrain_flag
-#         run: |
-#           if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "0 13 1 8 *" ]; then
-#             echo "is_retrain=true" >> $GITHUB_OUTPUT
-#           else
-#             echo "is_retrain=false" >> $GITHUB_OUTPUT
-#           fi
+      # ✅ Detect annual retrain run (Aug 1 cron)
+      - name: Detect annual retrain run
+        id: retrain_flag
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "0 13 1 8 *" ]; then
+            echo "is_retrain=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_retrain=false" >> $GITHUB_OUTPUT
+          fi
 
-#       # ✅ Detect next-day script usage:
-#       # - manual run: depends on inputs.run_mode
-#       - name: Detect next-day run (schedule or manual)
-#         id: nextday_flag
-#         run: |
-#           # Manual run: use input selection
-#           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-#             if [ "${{ inputs.run_mode }}" = "next_day" ]; then
-#               echo "use_nextday=true" >> $GITHUB_OUTPUT
-#             else
-#               echo "use_nextday=false" >> $GITHUB_OUTPUT
-#             fi
-#             exit 0
-#           fi
+      # ✅ Detect next-day script usage:
+      # - manual run: depends on inputs.run_mode
+      - name: Detect next-day run (schedule or manual)
+        id: nextday_flag
+        run: |
+          # Manual run: use input selection
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.run_mode }}" = "next_day" ]; then
+              echo "use_nextday=true" >> $GITHUB_OUTPUT
+            else
+              echo "use_nextday=false" >> $GITHUB_OUTPUT
+            fi
+            exit 0
+          fi
 
-#           # Scheduled run:
-#           # Auto detect using Los Angeles local time (DST safe)
-#           HOUR_PT=$(TZ=America/Los_Angeles date +%H)
+          # Scheduled run:
+          # Auto detect using Los Angeles local time (DST safe)
+          HOUR_PT=$(TZ=America/Los_Angeles date +%H)
 
-#           echo "Current PT hour = $HOUR_PT"
+          echo "Current PT hour = $HOUR_PT"
 
-#           # Night run (20~23시) -> next_day
-#           if [ "$HOUR_PT" -ge 20 ]; then
-#             echo "use_nextday=true" >> $GITHUB_OUTPUT
-#           else
-#             echo "use_nextday=false" >> $GITHUB_OUTPUT
-#           fi
+          # Night run (20~23시) -> next_day
+          if [ "$HOUR_PT" -ge 20 ]; then
+            echo "use_nextday=true" >> $GITHUB_OUTPUT
+          else
+            echo "use_nextday=false" >> $GITHUB_OUTPUT
+          fi
 
-#       # ✅ Check if PKLs exist (MUST match config.py paths)
-#       - name: Check if model PKLs exist
-#         id: model_check
-#         run: |
-#           WIN_PKL="models/nhl_xgb_win.pkl"
-#           MARGIN_PKL="models/nhl_xgb_margin.pkl"
+      # ✅ Check if PKLs exist (MUST match config.py paths)
+      - name: Check if model PKLs exist
+        id: model_check
+        run: |
+          WIN_PKL="models/nhl_xgb_win.pkl"
+          MARGIN_PKL="models/nhl_xgb_margin.pkl"
 
-#           if [ -f "$WIN_PKL" ] && [ -f "$MARGIN_PKL" ]; then
-#             echo "need_train=false" >> $GITHUB_OUTPUT
-#             echo "PKLs found. Will reuse."
-#           else
-#             echo "need_train=true" >> $GITHUB_OUTPUT
-#             echo "PKLs missing. Will train and commit."
-#           fi
+          if [ -f "$WIN_PKL" ] && [ -f "$MARGIN_PKL" ]; then
+            echo "need_train=false" >> $GITHUB_OUTPUT
+            echo "PKLs found. Will reuse."
+          else
+            echo "need_train=true" >> $GITHUB_OUTPUT
+            echo "PKLs missing. Will train and commit."
+          fi
 
-#       # ✅ Train if missing OR annual retrain day
-#       - name: Train NHL Model (only when missing or annual retrain)
-#         if: steps.model_check.outputs.need_train == 'true' || steps.retrain_flag.outputs.is_retrain == 'true'
-#         env:
-#           BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
-#           BALLDONTLIE_BASE_URL: ${{ secrets.BALLDONTLIE_BASE_URL }}
-#         run: |
-#           python nhl_train_quant.py
+      # ✅ Train if missing OR annual retrain day
+      - name: Train NHL Model (only when missing or annual retrain)
+        if: steps.model_check.outputs.need_train == 'true' || steps.retrain_flag.outputs.is_retrain == 'true'
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+          BALLDONTLIE_BASE_URL: ${{ secrets.BALLDONTLIE_BASE_URL }}
+        run: |
+          python nhl_train_quant.py
 
-#       # ✅ Commit & push PKLs (+ .gitkeep) if training ran
-#       - name: Commit & push updated PKLs (and keep files)
-#         if: steps.model_check.outputs.need_train == 'true' || steps.retrain_flag.outputs.is_retrain == 'true'
-#         run: |
-#           git config user.name "github-actions[bot]"
-#           git config user.email "github-actions[bot]@users.noreply.github.com"
+      # ✅ Commit & push PKLs (+ .gitkeep) if training ran
+      - name: Commit & push updated PKLs (and keep files)
+        if: steps.model_check.outputs.need_train == 'true' || steps.retrain_flag.outputs.is_retrain == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-#           git add models/nhl_xgb_win.pkl models/nhl_xgb_margin.pkl models/.gitkeep data/.gitkeep || true
-#           git status
+          git add models/nhl_xgb_win.pkl models/nhl_xgb_margin.pkl models/.gitkeep data/.gitkeep || true
+          git status
 
-#           git diff --cached --quiet && echo "No model changes to commit." && exit 0
+          git diff --cached --quiet && echo "No model changes to commit." && exit 0
 
-#           git commit -m "Update NHL model PKLs (auto)"
-#           git push
+          git commit -m "Update NHL model PKLs (auto)"
+          git push
 
-#       # ✅ Run bot (daily + retrain day)
-#       - name: Run NHL Quant-Bot
-#         env:
-#           EMAIL_HOST: ${{ secrets.EMAIL_HOST }}
-#           EMAIL_PORT: ${{ secrets.EMAIL_PORT }}
-#           EMAIL_USER: ${{ secrets.EMAIL_USER }}
-#           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-#           EMAIL_TO: ${{ secrets.EMAIL_TO }}
+      # ✅ Run bot (daily + retrain day)
+      - name: Run NHL Quant-Bot
+        env:
+          EMAIL_HOST: ${{ secrets.EMAIL_HOST }}
+          EMAIL_PORT: ${{ secrets.EMAIL_PORT }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
 
-#           BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
-#           BALLDONTLIE_BASE_URL: ${{ secrets.BALLDONTLIE_BASE_URL }}
-#           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-#           ODDS_API_BASE_URL: ${{ secrets.ODDS_API_BASE_URL }}
-#         run: |
-#           if [ "${{ steps.nextday_flag.outputs.use_nextday }}" = "true" ]; then
-#             echo "[RUN] Using next-day script: nhl_quant_main_next_day.py"
-#             python nhl_quant_main_next_day.py
-#           else
-#             echo "[RUN] Using normal script: nhl_quant_main.py"
-#             python nhl_quant_main.py
-#           fi
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+          BALLDONTLIE_BASE_URL: ${{ secrets.BALLDONTLIE_BASE_URL }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          ODDS_API_BASE_URL: ${{ secrets.ODDS_API_BASE_URL }}
+        run: |
+          if [ "${{ steps.nextday_flag.outputs.use_nextday }}" = "true" ]; then
+            echo "[RUN] Using next-day script: nhl_quant_main_next_day.py"
+            python nhl_quant_main_next_day.py
+          else
+            echo "[RUN] Using normal script: nhl_quant_main.py"
+            python nhl_quant_main.py
+          fi
