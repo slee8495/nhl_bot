@@ -1,14 +1,14 @@
 name: NHL Quant-Bot
 
 on:
-  schedule:
-    # WINTER 
-    # - cron: "39 4 * * *"    # 8:39 PM PT (PST) 
-    # - cron: "17 14 * * *"   # 6:17 AM PT (PST) 
+  # schedule:
+  #   # WINTER 
+  #   # - cron: "39 4 * * *"    # 8:39 PM PT (PST) 
+  #   # - cron: "17 14 * * *"   # 6:17 AM PT (PST) 
 
-    # SUMMER
-    - cron: "39 3 * * *"   # 8:39 PM PT (PDT) 
-    - cron: "17 13 * * *"  # 6:17 AM PT (PDT) 
+  #   # SUMMER
+  #   - cron: "39 3 * * *"   # 8:39 PM PT (PDT) 
+  #   - cron: "17 13 * * *"  # 6:17 AM PT (PDT) 
 
 
 
